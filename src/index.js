@@ -113,7 +113,13 @@ async function main() {
   await restartEngines();
 
   // 8. Lancement du bot (long polling)
-  await bot.launch();
+  logger.info('[Boot] Tentative bot.launch()...');
+  await bot.launch().catch((err) => {
+    logger.error(`[Boot] ❌ bot.launch() ÉCHEC: ${err.message}`);
+    logger.error(`[Boot] → Vérifie TELEGRAM_BOT_TOKEN dans ton .env`);
+    logger.error(`[Boot] → curl https://api.telegram.org/bot<TOKEN>/getMe`);
+    process.exit(1);
+  });
   logger.info('[Boot] ✅ Bot Telegram actif (long polling)');
 
   // ── Notification de démarrage aux admins ───────────────────────────────
