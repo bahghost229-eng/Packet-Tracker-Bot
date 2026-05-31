@@ -1,7 +1,7 @@
 /**
  * commands.js
  * ─────────────────────────────────────────────────────────────────────────────
- * Handlers des commandes Telegram via Telegraf.
+ * Handlers des commandes Telegram via Telegraf — avec inline keyboards.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -46,81 +46,133 @@ function authGuard(ctx, next) {
   return next();
 }
 
+/** Échappe les caractères spéciaux MarkdownV2 */
+const esc = (t) => String(t).replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, '\\$&');
+
 /**
  * Enregistre toutes les commandes sur l'instance Telegraf.
  * @param {import('telegraf').Telegraf} bot
- * @param {Function} restartEngines - Callback pour redémarrer les moteurs après ajout de stratégie
+ * @param {Function} restartEngines
  */
 function registerCommands(bot, restartEngines) {
 
   bot.use(authGuard);
 
-  // ── /start ──────────────────────────────────────────────────────────────
+  // ═══════════════════════════════════════════════════════════════════════════
+  // /start — Menu principal avec boutons
+  // ═══════════════════════════════════════════════════════════════════════════
 
   bot.command('start', (ctx) => {
     const msg =
       `👋 *Packet Tracker Bot*\n\n` +
-      `Surveillance Solana en temps réel\\.\n\n` +
-      `*Commandes disponibles:*\n` +
-      `/add\\_standard — Surveiller un wallet \\(range SOL stricte\\)\n` +
-      `/add\\_chain — Suivre une chaîne de transferts\n` +
-      `/status — Voir les stratégies actives\n` +
-      `/pause \\[id\\] — Mettre en pause une stratégie\n` +
-      `/resume \\[id\\] — Réactiver une stratégie\n` +
-      `/delete \\[id\\] — Supprimer une stratégie\n` +
-      `/backtest — Rejouer une chaîne sur une tx passée\n` +
-      `/exchanges — Lister les exchanges enregistrés\n` +
-      `/add\\_exchange — Ajouter un exchange\n` +
-      `/del\\_exchange — Supprimer un exchange\n` +
-      `/my\\_strategy — Voir tes stratégies perso\n` +
-      `/add\\_my\\_strategy — Ajouter une stratégie perso\n` +
-      `/export — Exporter les transactions en CSV\n` +
-      `/help — Aide détaillée`;
+      `Surveillance Solana en temps réel\\.\n` +
+      `Clique sur un bouton pour commencer\\.`;
 
-    ctx.replyWithMarkdownV2(msg);
+    ctx.replyWithMarkdownV2(msg, Markup.inlineKeyboard([
+      [
+        Markup.button.callback('📡 Mes Stratégies', 'menu_status'),
+        Markup.button.callback('➕ Ajouter Standard', 'menu_add_standard'),
+      ],
+      [
+        Markup.button.callback('🔗 Ajouter Chain', 'menu_add_chain'),
+        Markup.button.callback('🔬 Backtest', 'menu_add_backtest'),
+      ],
+      [
+        Markup.button.callback('🏦 Exchanges', 'menu_exchanges'),
+        Markup.button.callback('📋 Mes Strats Perso', 'menu_my_strategy'),
+      ],
+      [
+        Markup.button.callback('📤 Exporter CSV', 'menu_export'),
+        Markup.button.callback('📖 Aide', 'menu_help'),
+      ],
+    ]));
   });
 
-  // ── /help ────────────────────────────────────────────────────────────────
+  // ═══════════════════════════════════════════════════════════════════════════
+  // /help
+  // ═══════════════════════════════════════════════════════════════════════════
 
-  bot.command('help', (ctx) => {
-    const msg =
-      `📖 *Aide Packet Tracker*\n\n` +
-      `*Mode Standard:*\n` +
-      `\`/add\\_standard <wallet> <min\\_sol> <max\\_sol> [label] [fresh\\_only] [tradewiz\\_name]\`\n` +
-      `Ex: \`/add\\_standard ABC\\.\\.\\.XYZ 1\\.057 1\\.058 "Dev Alpha" true "CopyTrade1"\`\n\n` +
-      `*Mode Chain Tracker:*\n` +
-      `\`/add\\_chain <mother\\_wallet> <max\\_hops> [min\\_sol] [max\\_sol] [label] [fresh\\_only] [tradewiz\\_name]\`\n` +
-      `Ex: \`/add\\_chain ABC\\.\\.\\.XYZ 3 0\\.5 2\\.0 "Mother Alpha" true "Chain1"\`\n\n` +
-      `*Backtest:*\n` +
-      `\`/backtest <wallet> <signature> [max\\_hops]\`\n\n` +
-      `*Exchanges:*\n` +
-      `/exchanges — Liste les exchanges\n` +
-      `/add\\_exchange <nom> <wallet> \\[notes\\] — Ajouter\n` +
-      `/del\\_exchange <nom> — Supprimer\n\n` +
-      `*Mes Stratégies:*\n` +
-      `/my\\_strategy — Voir mes stratégies perso\n` +
-      `/add\\_my\\_strategy <wallet> <min> <max> \\[description\\] — Ajouter\n\n` +
-      `*Export:*\n` +
-      `/export <strategy\\_id> — Exporte les tx en CSV\n\n` +
-      `*Gestion:*\n` +
-      `/status — Liste toutes les stratégies\n` +
-      `/pause 1 — Pause la stratégie ID 1\n` +
-      `/resume 1 — Reprend la stratégie ID 1\n` +
-      `/delete 1 — Supprime la stratégie ID 1`;
+  bot.command('help', (ctx) => sendHelp(ctx));
 
-    ctx.replyWithMarkdownV2(msg);
+  // ═══════════════════════════════════════════════════════════════════════════
+  // /status — avec boutons Pause/Resume/Delete par stratégie
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  bot.command('status', (ctx) => sendStatus(ctx));
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // /pause <id>
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  bot.command('pause', async (ctx) => {
+    const id = parseInt(ctx.message.text.split(/\s+/)[1], 10);
+    if (!id) return ctx.reply(
+      '❌ Usage: /pause <id>',
+      Markup.inlineKeyboard([[Markup.button.callback('📡 Voir Stratégies', 'menu_status')]])
+    );
+    await doPause(ctx, id, restartEngines);
   });
 
-  // ── /add_standard ────────────────────────────────────────────────────────
-  // Usage: /add_standard <wallet> <min_sol> <max_sol> [label] [fresh_only] [tradewiz_name]
+  // ═══════════════════════════════════════════════════════════════════════════
+  // /resume <id>
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  bot.command('resume', async (ctx) => {
+    const id = parseInt(ctx.message.text.split(/\s+/)[1], 10);
+    if (!id) return ctx.reply(
+      '❌ Usage: /resume <id>',
+      Markup.inlineKeyboard([[Markup.button.callback('📡 Voir Stratégies', 'menu_status')]])
+    );
+    await doResume(ctx, id, restartEngines);
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // /delete <id>
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  bot.command('delete', async (ctx) => {
+    const id = parseInt(ctx.message.text.split(/\s+/)[1], 10);
+    if (!id) return ctx.reply(
+      '❌ Usage: /delete <id>',
+      Markup.inlineKeyboard([[Markup.button.callback('📡 Voir Stratégies', 'menu_status')]])
+    );
+
+    const s = getStrategyById(id);
+    if (!s || String(s.user_id) !== String(ctx.from.id)) {
+      return ctx.reply('❌ Stratégie introuvable.');
+    }
+
+    // Demande confirmation avant suppression
+    ctx.reply(
+      `⚠️ Confirmes-tu la suppression de la stratégie [${id}] — *${esc(s.label)}* ?`,
+      {
+        parse_mode: 'MarkdownV2',
+        ...Markup.inlineKeyboard([
+          [
+            Markup.button.callback('✅ Oui, supprimer', `confirm_delete_${id}`),
+            Markup.button.callback('❌ Annuler', 'menu_status'),
+          ],
+        ]),
+      }
+    );
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // /add_standard
+  // ═══════════════════════════════════════════════════════════════════════════
 
   bot.command('add_standard', async (ctx) => {
     const args = ctx.message.text.split(/\s+/).slice(1);
 
     if (args.length < 3) {
       return ctx.reply(
-        '❌ Usage: /add_standard <wallet> <min_sol> <max_sol> [label] [fresh_only] [tradewiz_name]\n' +
-        'Ex: /add_standard ABC...XYZ 1.057 1.058 "Dev Alpha" true "CopyTrade1"'
+        '📝 *Ajouter une stratégie Standard*\n\n' +
+        'Format:\n`/add_standard <wallet> <min_sol> <max_sol> [label] [fresh_only] [tradewiz]`\n\n' +
+        'Exemple:\n`/add_standard ABC...XYZ 1.057 1.058 "Alpha" true "Bot1"`',
+        {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([[Markup.button.callback('🔙 Menu Principal', 'menu_start')]]),
+        }
       );
     }
 
@@ -130,20 +182,22 @@ function registerCommands(bot, restartEngines) {
     const fresh_only = freshStr.toLowerCase() === 'true' ? 1 : 0;
 
     if (!isValidPublicKey(wallet)) {
-      return ctx.reply('❌ Adresse de wallet invalide.');
+      return ctx.reply('❌ Adresse de wallet invalide.',
+        Markup.inlineKeyboard([[Markup.button.callback('🔙 Menu', 'menu_start')]]));
     }
     if (isNaN(min_sol) || isNaN(max_sol) || min_sol >= max_sol) {
-      return ctx.reply('❌ min_sol et max_sol invalides (min < max requis).');
+      return ctx.reply('❌ min_sol et max_sol invalides (min < max requis).',
+        Markup.inlineKeyboard([[Markup.button.callback('🔙 Menu', 'menu_start')]]));
     }
 
     const id = addStrategy({
-      user_id:      String(ctx.from.id),
-      type:         'standard',
-      label:        label || wallet.slice(0, 8) + '...',
+      user_id:       String(ctx.from.id),
+      type:          'standard',
+      label:         label || wallet.slice(0, 8) + '...',
       wallet,
       min_sol,
       max_sol,
-      max_hops:     0,
+      max_hops:      0,
       fresh_only,
       tradewiz_name: tradewiz_name || null,
     });
@@ -151,26 +205,39 @@ function registerCommands(bot, restartEngines) {
     logger.info(`[CMD] add_standard: stratégie ${id} créée par ${ctx.from.id}`);
     await restartEngines();
 
-    const esc = (t) => String(t).replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, '\\$&');
     ctx.replyWithMarkdownV2(
-      `✅ Stratégie Standard ajoutée \\[ID: ${id}\\]\n` +
-      `Wallet: \`${esc(wallet)}\`\n` +
-      `Range: ${esc(min_sol)} — ${esc(max_sol)} SOL\n` +
-      `Fresh Only: ${fresh_only ? 'Oui' : 'Non'}\n` +
-      `TradeWiz: ${tradewiz_name ? esc(tradewiz_name) : '\\-'}`
+      `✅ *Stratégie Standard ajoutée* \\[ID: ${id}\\]\n\n` +
+      `🏷️ Label: *${esc(label || wallet.slice(0, 8) + '...')}*\n` +
+      `👛 Wallet: \`${esc(wallet)}\`\n` +
+      `📊 Range: ${esc(min_sol)} — ${esc(max_sol)} SOL\n` +
+      `🔍 Fresh Only: ${fresh_only ? '✅ Oui' : '❌ Non'}\n` +
+      `🤖 TradeWiz: ${tradewiz_name ? esc(tradewiz_name) : '\\-'}`,
+      Markup.inlineKeyboard([
+        [
+          Markup.button.callback('📡 Voir Stratégies', 'menu_status'),
+          Markup.button.callback('➕ Ajouter une autre', 'menu_add_standard'),
+        ],
+        [Markup.button.callback('🔙 Menu Principal', 'menu_start')],
+      ])
     );
   });
 
-  // ── /add_chain ───────────────────────────────────────────────────────────
-  // Usage: /add_chain <mother_wallet> <max_hops> [min_sol] [max_sol] [label] [fresh_only] [tradewiz_name]
+  // ═══════════════════════════════════════════════════════════════════════════
+  // /add_chain
+  // ═══════════════════════════════════════════════════════════════════════════
 
   bot.command('add_chain', async (ctx) => {
     const args = ctx.message.text.split(/\s+/).slice(1);
 
     if (args.length < 2) {
       return ctx.reply(
-        '❌ Usage: /add_chain <mother_wallet> <max_hops> [min_sol] [max_sol] [label] [fresh_only] [tradewiz_name]\n' +
-        'Ex: /add_chain ABC...XYZ 3 0.5 2.0 "Mother Alpha" true "Chain1"'
+        '📝 *Ajouter un Chain Tracker*\n\n' +
+        'Format:\n`/add_chain <wallet> <max_hops> [min_sol] [max_sol] [label] [fresh_only] [tradewiz]`\n\n' +
+        'Exemple:\n`/add_chain ABC...XYZ 3 0.5 2.0 "Mother" true "Bot1"`',
+        {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([[Markup.button.callback('🔙 Menu Principal', 'menu_start')]]),
+        }
       );
     }
 
@@ -181,16 +248,18 @@ function registerCommands(bot, restartEngines) {
     const fresh_only = freshStr.toLowerCase() === 'true' ? 1 : 0;
 
     if (!isValidPublicKey(wallet)) {
-      return ctx.reply('❌ Adresse de wallet invalide.');
+      return ctx.reply('❌ Adresse de wallet invalide.',
+        Markup.inlineKeyboard([[Markup.button.callback('🔙 Menu', 'menu_start')]]));
     }
     if (isNaN(max_hops) || max_hops < 1 || max_hops > 10) {
-      return ctx.reply('❌ max_hops invalide (valeur entre 1 et 10).');
+      return ctx.reply('❌ max_hops invalide (valeur entre 1 et 10).',
+        Markup.inlineKeyboard([[Markup.button.callback('🔙 Menu', 'menu_start')]]));
     }
 
     const id = addStrategy({
-      user_id:      String(ctx.from.id),
-      type:         'chain',
-      label:        label || 'Mother_' + wallet.slice(0, 6),
+      user_id:       String(ctx.from.id),
+      type:          'chain',
+      label:         label || 'Mother_' + wallet.slice(0, 6),
       wallet,
       min_sol,
       max_sol,
@@ -202,80 +271,38 @@ function registerCommands(bot, restartEngines) {
     logger.info(`[CMD] add_chain: stratégie ${id} créée par ${ctx.from.id}`);
     await restartEngines();
 
-    const esc = (t) => String(t).replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, '\\$&');
     ctx.replyWithMarkdownV2(
-      `✅ Chain Tracker ajouté \\[ID: ${id}\\]\n` +
-      `Mother Wallet: \`${esc(wallet)}\`\n` +
-      `Max Hops: ${max_hops} \\| Fresh Only: ${fresh_only ? 'Oui' : 'Non'}\n` +
-      `TradeWiz: ${tradewiz_name ? esc(tradewiz_name) : '\\-'}`
+      `✅ *Chain Tracker ajouté* \\[ID: ${id}\\]\n\n` +
+      `🏷️ Label: *${esc(label || 'Mother_' + wallet.slice(0, 6))}*\n` +
+      `👛 Mother Wallet: \`${esc(wallet)}\`\n` +
+      `🔗 Max Hops: ${max_hops}\n` +
+      `📊 Range: ${esc(min_sol)} — ${esc(max_sol)} SOL\n` +
+      `🔍 Fresh Only: ${fresh_only ? '✅ Oui' : '❌ Non'}\n` +
+      `🤖 TradeWiz: ${tradewiz_name ? esc(tradewiz_name) : '\\-'}`,
+      Markup.inlineKeyboard([
+        [
+          Markup.button.callback('📡 Voir Stratégies', 'menu_status'),
+          Markup.button.callback('🔗 Ajouter un autre', 'menu_add_chain'),
+        ],
+        [Markup.button.callback('🔙 Menu Principal', 'menu_start')],
+      ])
     );
   });
 
-  // ── /status ──────────────────────────────────────────────────────────────
-
-  bot.command('status', (ctx) => {
-    const strategies = getStrategies(String(ctx.from.id));
-    const msg = formatStatus(strategies);
-    ctx.replyWithMarkdownV2(msg);
-  });
-
-  // ── /pause <id> ──────────────────────────────────────────────────────────
-
-  bot.command('pause', async (ctx) => {
-    const id = parseInt(ctx.message.text.split(/\s+/)[1], 10);
-    if (!id) return ctx.reply('❌ Usage: /pause <id>');
-
-    const s = getStrategyById(id);
-    if (!s || String(s.user_id) !== String(ctx.from.id)) {
-      return ctx.reply('❌ Stratégie introuvable.');
-    }
-
-    toggleStrategy(id, false);
-    await restartEngines();
-    ctx.reply(`⏸️ Stratégie [${id}] mise en pause.`);
-  });
-
-  // ── /resume <id> ─────────────────────────────────────────────────────────
-
-  bot.command('resume', async (ctx) => {
-    const id = parseInt(ctx.message.text.split(/\s+/)[1], 10);
-    if (!id) return ctx.reply('❌ Usage: /resume <id>');
-
-    const s = getStrategyById(id);
-    if (!s || String(s.user_id) !== String(ctx.from.id)) {
-      return ctx.reply('❌ Stratégie introuvable.');
-    }
-
-    toggleStrategy(id, true);
-    await restartEngines();
-    ctx.reply(`✅ Stratégie [${id}] réactivée.`);
-  });
-
-  // ── /delete <id> ─────────────────────────────────────────────────────────
-
-  bot.command('delete', async (ctx) => {
-    const id = parseInt(ctx.message.text.split(/\s+/)[1], 10);
-    if (!id) return ctx.reply('❌ Usage: /delete <id>');
-
-    const s = getStrategyById(id);
-    if (!s || String(s.user_id) !== String(ctx.from.id)) {
-      return ctx.reply('❌ Stratégie introuvable.');
-    }
-
-    deleteStrategy(id);
-    await restartEngines();
-    ctx.reply(`🗑️ Stratégie [${id}] supprimée.`);
-  });
-
-  // ── /backtest <wallet> <signature> [max_hops] ────────────────────────────
+  // ═══════════════════════════════════════════════════════════════════════════
+  // /backtest
+  // ═══════════════════════════════════════════════════════════════════════════
 
   bot.command('backtest', async (ctx) => {
     const args = ctx.message.text.split(/\s+/).slice(1);
 
     if (args.length < 2) {
       return ctx.reply(
-        '❌ Usage: /backtest <wallet> <signature> [max_hops]\n' +
-        'Ex: /backtest ABC...XYZ 5UqmK...abc123 5'
+        '🔬 *Backtest*\n\nFormat:\n`/backtest <wallet> <signature> [max_hops]`\n\nEx:\n`/backtest ABC...XYZ 5UqmK...abc 5`',
+        {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([[Markup.button.callback('🔙 Menu', 'menu_start')]]),
+        }
       );
     }
 
@@ -283,101 +310,128 @@ function registerCommands(bot, restartEngines) {
     const maxHops = parseInt(hopsStr, 10) || 10;
 
     if (!isValidPublicKey(wallet)) {
-      return ctx.reply('❌ Adresse de wallet invalide.');
+      return ctx.reply('❌ Adresse de wallet invalide.',
+        Markup.inlineKeyboard([[Markup.button.callback('🔙 Menu', 'menu_start')]]));
     }
 
-    await ctx.reply('🔬 Backtest en cours... (peut prendre quelques secondes)');
+    const loadingMsg = await ctx.reply('🔬 Backtest en cours\\.\\.\\. ⏳', { parse_mode: 'MarkdownV2' });
 
     try {
       const result = await runBacktest(wallet, signature, maxHops);
       const msg    = formatBacktestResult(result);
-      await ctx.replyWithMarkdownV2(msg, { disable_web_page_preview: true });
+
+      await ctx.replyWithMarkdownV2(msg, {
+        disable_web_page_preview: true,
+        ...Markup.inlineKeyboard([
+          [
+            Markup.button.callback('🔬 Nouveau Backtest', 'menu_add_backtest'),
+            Markup.button.callback('🔙 Menu', 'menu_start'),
+          ],
+        ]),
+      });
     } catch (err) {
       logger.error(`[CMD] backtest erreur: ${err.message}`);
-      ctx.reply(`❌ Erreur backtest: ${err.message}`);
+      ctx.reply(`❌ Erreur backtest: ${err.message}`,
+        Markup.inlineKeyboard([[Markup.button.callback('🔙 Menu', 'menu_start')]]));
     }
   });
 
-  // ── /exchanges ───────────────────────────────────────────────────────────
+  // ═══════════════════════════════════════════════════════════════════════════
+  // /exchanges
+  // ═══════════════════════════════════════════════════════════════════════════
 
-  bot.command('exchanges', (ctx) => {
-    const list = getExchanges(ctx.from.id);
-    if (!list.length) {
-      return ctx.reply('📭 Aucun exchange enregistré.\nUtilise /add_exchange pour en ajouter.');
-    }
+  bot.command('exchanges', (ctx) => sendExchanges(ctx));
 
-    const esc = (t) => String(t).replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, '\\$&');
-    let msg = `🏦 *Exchanges enregistrés \\(${list.length}\\):*\n\n`;
-    for (const e of list) {
-      msg += `*${esc(e.name)}*\n\`${esc(e.wallet)}\`\n`;
-      if (e.notes) msg += `_${esc(e.notes)}_\n`;
-      msg += '\n';
-    }
-
-    ctx.replyWithMarkdownV2(msg.trim());
-  });
-
-  // ── /add_exchange <nom> <wallet> [notes] ─────────────────────────────────
+  // ═══════════════════════════════════════════════════════════════════════════
+  // /add_exchange <nom> <wallet> [notes]
+  // ═══════════════════════════════════════════════════════════════════════════
 
   bot.command('add_exchange', (ctx) => {
     const args = ctx.message.text.split(/\s+/).slice(1);
 
     if (args.length < 2) {
-      return ctx.reply('❌ Usage: /add_exchange <nom> <wallet> [notes]');
+      return ctx.reply(
+        '🏦 *Ajouter un Exchange*\n\nFormat:\n`/add_exchange <nom> <wallet> [notes]`\n\nEx:\n`/add_exchange Binance ABC...XYZ "Hot wallet"`',
+        {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([[Markup.button.callback('🔙 Menu', 'menu_start')]]),
+        }
+      );
     }
 
     const [name, wallet, ...notesParts] = args;
     const notes = notesParts.join(' ') || null;
 
     if (!isValidPublicKey(wallet)) {
-      return ctx.reply('❌ Adresse de wallet invalide.');
+      return ctx.reply('❌ Adresse de wallet invalide.',
+        Markup.inlineKeyboard([[Markup.button.callback('🔙 Menu', 'menu_start')]]));
     }
 
     addExchange({ user_id: ctx.from.id, name, wallet, notes });
-    ctx.reply(`✅ Exchange "${name}" ajouté.`);
+
+    ctx.reply(
+      `✅ Exchange *"${name}"* ajouté\\.`,
+      {
+        parse_mode: 'MarkdownV2',
+        ...Markup.inlineKeyboard([
+          [
+            Markup.button.callback('🏦 Voir Exchanges', 'menu_exchanges'),
+            Markup.button.callback('➕ Ajouter un autre', 'menu_add_exchange'),
+          ],
+          [Markup.button.callback('🔙 Menu Principal', 'menu_start')],
+        ]),
+      }
+    );
   });
 
-  // ── /del_exchange <nom> ───────────────────────────────────────────────────
+  // ═══════════════════════════════════════════════════════════════════════════
+  // /del_exchange <nom>
+  // ═══════════════════════════════════════════════════════════════════════════
 
   bot.command('del_exchange', (ctx) => {
     const name = ctx.message.text.split(/\s+/).slice(1).join(' ').trim();
 
     if (!name) {
-      return ctx.reply('❌ Usage: /del_exchange <nom>');
+      return ctx.reply('❌ Usage: /del_exchange <nom>',
+        Markup.inlineKeyboard([[Markup.button.callback('🏦 Exchanges', 'menu_exchanges')]]));
     }
 
     deleteExchange(ctx.from.id, name);
-    ctx.reply(`🗑️ Exchange "${name}" supprimé.`);
+    ctx.reply(
+      `🗑️ Exchange *"${esc(name)}"* supprimé\\.`,
+      {
+        parse_mode: 'MarkdownV2',
+        ...Markup.inlineKeyboard([
+          [
+            Markup.button.callback('🏦 Voir Exchanges', 'menu_exchanges'),
+            Markup.button.callback('🔙 Menu', 'menu_start'),
+          ],
+        ]),
+      }
+    );
   });
 
-  // ── /my_strategy ──────────────────────────────────────────────────────────
+  // ═══════════════════════════════════════════════════════════════════════════
+  // /my_strategy
+  // ═══════════════════════════════════════════════════════════════════════════
 
-  bot.command('my_strategy', (ctx) => {
-    const list = getUserStrategies(ctx.from.id);
-    if (!list.length) {
-      return ctx.reply('📭 Aucune stratégie perso.\nUtilise /add_my_strategy pour en créer une.');
-    }
+  bot.command('my_strategy', (ctx) => sendMyStrategies(ctx));
 
-    const esc = (t) => String(t).replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, '\\$&');
-    let msg = `📋 *Mes Stratégies \\(${list.length}\\):*\n\n`;
-    for (const s of list) {
-      msg +=
-        `*ID ${s.id}* — \`${esc(s.wallet)}\`\n` +
-        `Range: ${esc(s.min_sol)} — ${esc(s.max_sol)} SOL\n`;
-      if (s.description) msg += `_${esc(s.description)}_\n`;
-      msg += '\n';
-    }
-
-    ctx.replyWithMarkdownV2(msg.trim());
-  });
-
-  // ── /add_my_strategy <wallet> <min_sol> <max_sol> [description] ──────────
+  // ═══════════════════════════════════════════════════════════════════════════
+  // /add_my_strategy <wallet> <min_sol> <max_sol> [description]
+  // ═══════════════════════════════════════════════════════════════════════════
 
   bot.command('add_my_strategy', (ctx) => {
     const args = ctx.message.text.split(/\s+/).slice(1);
 
     if (args.length < 3) {
-      return ctx.reply('❌ Usage: /add_my_strategy <wallet> <min_sol> <max_sol> [description]');
+      return ctx.reply(
+        '📋 *Ajouter une Stratégie Perso*\n\nFormat:\n`/add_my_strategy <wallet> <min_sol> <max_sol> [description]`',
+        {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([[Markup.button.callback('🔙 Menu', 'menu_start')]]),
+        }
+      );
     }
 
     const [wallet, minStr, maxStr, ...descParts] = args;
@@ -386,61 +440,291 @@ function registerCommands(bot, restartEngines) {
     const description = descParts.join(' ') || null;
 
     if (!isValidPublicKey(wallet)) {
-      return ctx.reply('❌ Adresse de wallet invalide.');
+      return ctx.reply('❌ Adresse de wallet invalide.',
+        Markup.inlineKeyboard([[Markup.button.callback('🔙 Menu', 'menu_start')]]));
     }
     if (isNaN(min_sol) || isNaN(max_sol) || min_sol >= max_sol) {
-      return ctx.reply('❌ min_sol et max_sol invalides (min < max requis).');
+      return ctx.reply('❌ min_sol et max_sol invalides.',
+        Markup.inlineKeyboard([[Markup.button.callback('🔙 Menu', 'menu_start')]]));
     }
 
     const id = addUserStrategy({ user_id: ctx.from.id, wallet, min_sol, max_sol, description });
-    ctx.reply(`✅ Stratégie perso [ID: ${id}] ajoutée.`);
+
+    ctx.reply(
+      `✅ Stratégie perso \\[ID: ${id}\\] ajoutée\\.`,
+      {
+        parse_mode: 'MarkdownV2',
+        ...Markup.inlineKeyboard([
+          [
+            Markup.button.callback('📋 Voir Mes Strats', 'menu_my_strategy'),
+            Markup.button.callback('🔙 Menu', 'menu_start'),
+          ],
+        ]),
+      }
+    );
   });
 
-  // ── /del_my_strategy <id> ─────────────────────────────────────────────────
+  // ═══════════════════════════════════════════════════════════════════════════
+  // /del_my_strategy <id>
+  // ═══════════════════════════════════════════════════════════════════════════
 
   bot.command('del_my_strategy', (ctx) => {
     const id = parseInt(ctx.message.text.split(/\s+/)[1], 10);
-    if (!id) return ctx.reply('❌ Usage: /del_my_strategy <id>');
+    if (!id) return ctx.reply('❌ Usage: /del_my_strategy <id>',
+      Markup.inlineKeyboard([[Markup.button.callback('📋 Mes Strats', 'menu_my_strategy')]]));
 
-    deleteUserStrategy(ctx.from.id, id);
-    ctx.reply(`🗑️ Stratégie perso [${id}] supprimée.`);
+    // Demande confirmation
+    ctx.reply(
+      `⚠️ Confirmes-tu la suppression de la stratégie perso \\[${id}\\] ?`,
+      {
+        parse_mode: 'MarkdownV2',
+        ...Markup.inlineKeyboard([
+          [
+            Markup.button.callback('✅ Oui, supprimer', `confirm_del_mystrat_${id}`),
+            Markup.button.callback('❌ Annuler', 'menu_my_strategy'),
+          ],
+        ]),
+      }
+    );
   });
 
-  // ── /export <strategy_id> ─────────────────────────────────────────────────
+  // ═══════════════════════════════════════════════════════════════════════════
+  // /export <strategy_id>
+  // ═══════════════════════════════════════════════════════════════════════════
 
   bot.command('export', async (ctx) => {
     const stratId = parseInt(ctx.message.text.split(/\s+/)[1], 10);
 
     if (!stratId) {
-      return ctx.reply('❌ Usage: /export <strategy_id>');
+      // Affiche la liste des stratégies pour que l'user clique
+      const strategies = getStrategies(String(ctx.from.id));
+      if (!strategies.length) {
+        return ctx.reply('📭 Aucune stratégie disponible.',
+          Markup.inlineKeyboard([[Markup.button.callback('🔙 Menu', 'menu_start')]]));
+      }
+
+      const buttons = strategies.map((s) =>
+        [Markup.button.callback(`📤 [${s.id}] ${s.label}`, `export_${s.id}`)]
+      );
+      buttons.push([Markup.button.callback('🔙 Menu', 'menu_start')]);
+
+      return ctx.reply('📊 Choisir la stratégie à exporter:', Markup.inlineKeyboard(buttons));
     }
 
-    const strategy = getStrategyById(stratId);
-    if (!strategy || String(strategy.user_id) !== String(ctx.from.id)) {
+    await doExport(ctx, stratId);
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // CALLBACKS — Boutons inline
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // ── Navigation menu ───────────────────────────────────────────────────────
+
+  bot.action('menu_start', (ctx) => {
+    ctx.answerCbQuery();
+    const msg =
+      `👋 *Packet Tracker Bot*\n\n` +
+      `Surveillance Solana en temps réel\\.\n` +
+      `Clique sur un bouton pour commencer\\.`;
+
+    ctx.editMessageText(msg, {
+      parse_mode: 'MarkdownV2',
+      ...Markup.inlineKeyboard([
+        [
+          Markup.button.callback('📡 Mes Stratégies', 'menu_status'),
+          Markup.button.callback('➕ Ajouter Standard', 'menu_add_standard'),
+        ],
+        [
+          Markup.button.callback('🔗 Ajouter Chain', 'menu_add_chain'),
+          Markup.button.callback('🔬 Backtest', 'menu_add_backtest'),
+        ],
+        [
+          Markup.button.callback('🏦 Exchanges', 'menu_exchanges'),
+          Markup.button.callback('📋 Mes Strats Perso', 'menu_my_strategy'),
+        ],
+        [
+          Markup.button.callback('📤 Exporter CSV', 'menu_export'),
+          Markup.button.callback('📖 Aide', 'menu_help'),
+        ],
+      ]),
+    }).catch(() => {});
+  });
+
+  bot.action('menu_help', (ctx) => {
+    ctx.answerCbQuery();
+    sendHelp(ctx);
+  });
+
+  bot.action('menu_status', (ctx) => {
+    ctx.answerCbQuery();
+    sendStatus(ctx);
+  });
+
+  bot.action('menu_exchanges', (ctx) => {
+    ctx.answerCbQuery();
+    sendExchanges(ctx);
+  });
+
+  bot.action('menu_my_strategy', (ctx) => {
+    ctx.answerCbQuery();
+    sendMyStrategies(ctx);
+  });
+
+  bot.action('menu_add_standard', (ctx) => {
+    ctx.answerCbQuery();
+    ctx.reply(
+      '📝 *Ajouter une stratégie Standard*\n\n' +
+      'Envoie la commande avec le format suivant:\n\n' +
+      '`/add_standard <wallet> <min_sol> <max_sol> [label] [fresh_only] [tradewiz]`\n\n' +
+      '📌 *Exemple:*\n`/add_standard ABC...XYZ 1.057 1.058 "Dev Alpha" true "Bot1"`\n\n' +
+      '• `fresh_only` = `true` pour ignorer les anciens wallets\n' +
+      '• `tradewiz` = nom du bot TradeWiz \\(optionnel\\)',
+      {
+        parse_mode: 'MarkdownV2',
+        ...Markup.inlineKeyboard([[Markup.button.callback('🔙 Menu', 'menu_start')]]),
+      }
+    );
+  });
+
+  bot.action('menu_add_chain', (ctx) => {
+    ctx.answerCbQuery();
+    ctx.reply(
+      '🔗 *Ajouter un Chain Tracker*\n\n' +
+      'Envoie la commande avec le format suivant:\n\n' +
+      '`/add_chain <wallet> <max_hops> [min_sol] [max_sol] [label] [fresh_only] [tradewiz]`\n\n' +
+      '📌 *Exemple:*\n`/add_chain ABC...XYZ 3 0.5 2.0 "Mother" true "Chain1"`\n\n' +
+      '• `max_hops` = nombre de sauts max \\(1\\-10\\)',
+      {
+        parse_mode: 'MarkdownV2',
+        ...Markup.inlineKeyboard([[Markup.button.callback('🔙 Menu', 'menu_start')]]),
+      }
+    );
+  });
+
+  bot.action('menu_add_backtest', (ctx) => {
+    ctx.answerCbQuery();
+    ctx.reply(
+      '🔬 *Backtest*\n\n' +
+      'Envoie la commande avec le format suivant:\n\n' +
+      '`/backtest <wallet> <signature> [max_hops]`\n\n' +
+      '📌 *Exemple:*\n`/backtest ABC...XYZ 5UqmK...abc 5`',
+      {
+        parse_mode: 'MarkdownV2',
+        ...Markup.inlineKeyboard([[Markup.button.callback('🔙 Menu', 'menu_start')]]),
+      }
+    );
+  });
+
+  bot.action('menu_add_exchange', (ctx) => {
+    ctx.answerCbQuery();
+    ctx.reply(
+      '🏦 *Ajouter un Exchange*\n\n' +
+      'Envoie la commande avec le format suivant:\n\n' +
+      '`/add_exchange <nom> <wallet> [notes]`\n\n' +
+      '📌 *Exemple:*\n`/add_exchange Binance ABC...XYZ "Hot wallet"`',
+      {
+        parse_mode: 'MarkdownV2',
+        ...Markup.inlineKeyboard([[Markup.button.callback('🔙 Menu', 'menu_start')]]),
+      }
+    );
+  });
+
+  bot.action('menu_export', (ctx) => {
+    ctx.answerCbQuery();
+    const strategies = getStrategies(String(ctx.from.id));
+    if (!strategies.length) {
+      return ctx.reply('📭 Aucune stratégie disponible.',
+        Markup.inlineKeyboard([[Markup.button.callback('🔙 Menu', 'menu_start')]]));
+    }
+
+    const buttons = strategies.map((s) =>
+      [Markup.button.callback(`📤 [${s.id}] ${s.label}`, `export_${s.id}`)]
+    );
+    buttons.push([Markup.button.callback('🔙 Menu', 'menu_start')]);
+
+    ctx.reply('📊 Choisir la stratégie à exporter:', Markup.inlineKeyboard(buttons));
+  });
+
+  // ── Actions par stratégie ─────────────────────────────────────────────────
+
+  // Pause inline
+  bot.action(/^pause_(\d+)$/, async (ctx) => {
+    ctx.answerCbQuery();
+    const id = parseInt(ctx.match[1], 10);
+    await doPause(ctx, id, restartEngines);
+  });
+
+  // Resume inline
+  bot.action(/^resume_(\d+)$/, async (ctx) => {
+    ctx.answerCbQuery();
+    const id = parseInt(ctx.match[1], 10);
+    await doResume(ctx, id, restartEngines);
+  });
+
+  // Delete — demande confirmation
+  bot.action(/^delete_(\d+)$/, (ctx) => {
+    ctx.answerCbQuery();
+    const id = parseInt(ctx.match[1], 10);
+    const s  = getStrategyById(id);
+    if (!s || String(s.user_id) !== String(ctx.from.id)) {
       return ctx.reply('❌ Stratégie introuvable.');
     }
 
-    const rows = getTrackedTxsByStrategy(stratId);
+    ctx.reply(
+      `⚠️ Confirmes-tu la suppression de la stratégie \\[${id}\\] — *${esc(s.label)}* ?`,
+      {
+        parse_mode: 'MarkdownV2',
+        ...Markup.inlineKeyboard([
+          [
+            Markup.button.callback('✅ Oui, supprimer', `confirm_delete_${id}`),
+            Markup.button.callback('❌ Annuler', 'menu_status'),
+          ],
+        ]),
+      }
+    );
+  });
 
-    if (!rows.length) {
-      return ctx.reply(`📭 Aucune transaction trackée pour la stratégie [${stratId}].`);
+  // Confirm delete
+  bot.action(/^confirm_delete_(\d+)$/, async (ctx) => {
+    ctx.answerCbQuery('Suppression...');
+    const id = parseInt(ctx.match[1], 10);
+    const s  = getStrategyById(id);
+    if (!s || String(s.user_id) !== String(ctx.from.id)) {
+      return ctx.reply('❌ Stratégie introuvable.');
     }
 
-    try {
-      const label    = strategy.label || `strategy_${stratId}`;
-      const filePath = generateCsv(rows, label);
+    deleteStrategy(id);
+    await restartEngines();
 
-      await ctx.replyWithDocument(
-        { source: filePath, filename: filePath.split('/').pop() },
-        { caption: `📊 Export CSV — Stratégie [${stratId}] — ${rows.length} tx` }
-      );
+    ctx.editMessageText(
+      `🗑️ Stratégie \\[${id}\\] *${esc(s.label)}* supprimée\\.`,
+      {
+        parse_mode: 'MarkdownV2',
+        ...Markup.inlineKeyboard([[Markup.button.callback('📡 Voir Stratégies', 'menu_status')]]),
+      }
+    ).catch(() => ctx.reply(`🗑️ Stratégie [${id}] supprimée.`));
+  });
 
-      // Nettoyage du fichier temporaire après envoi
-      fs.unlink(filePath, () => {});
-    } catch (err) {
-      logger.error(`[CMD] export erreur: ${err.message}`);
-      ctx.reply(`❌ Erreur lors de l'export: ${err.message}`);
-    }
+  // Export inline
+  bot.action(/^export_(\d+)$/, async (ctx) => {
+    ctx.answerCbQuery('Export en cours...');
+    const stratId = parseInt(ctx.match[1], 10);
+    await doExport(ctx, stratId);
+  });
+
+  // Confirm del_my_strategy
+  bot.action(/^confirm_del_mystrat_(\d+)$/, (ctx) => {
+    ctx.answerCbQuery('Suppression...');
+    const id = parseInt(ctx.match[1], 10);
+    deleteUserStrategy(ctx.from.id, id);
+
+    ctx.editMessageText(
+      `🗑️ Stratégie perso \\[${id}\\] supprimée\\.`,
+      {
+        parse_mode: 'MarkdownV2',
+        ...Markup.inlineKeyboard([[Markup.button.callback('📋 Mes Strats', 'menu_my_strategy')]]),
+      }
+    ).catch(() => ctx.reply(`🗑️ Stratégie perso [${id}] supprimée.`));
   });
 
   // ── Handler erreurs globales ──────────────────────────────────────────────
@@ -451,4 +735,258 @@ function registerCommands(bot, restartEngines) {
   });
 }
 
-module.exports = { registerCommands, authGuard };
+// ═══════════════════════════════════════════════════════════════════════════
+// Fonctions helpers réutilisables
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** Envoie le message d'aide */
+function sendHelp(ctx) {
+  const msg =
+    `📖 *Aide Packet Tracker*\n\n` +
+    `*Mode Standard:*\n` +
+    `\`/add\\_standard <wallet> <min\\_sol> <max\\_sol> \\[label\\] \\[fresh\\_only\\] \\[tradewiz\\]\`\n\n` +
+    `*Mode Chain Tracker:*\n` +
+    `\`/add\\_chain <wallet> <max\\_hops> \\[min\\_sol\\] \\[max\\_sol\\] \\[label\\] \\[fresh\\_only\\] \\[tradewiz\\]\`\n\n` +
+    `*Backtest:*\n` +
+    `\`/backtest <wallet> <signature> \\[max\\_hops\\]\`\n\n` +
+    `*Exchanges:*\n` +
+    `\`/add\\_exchange <nom> <wallet> \\[notes\\]\`\n` +
+    `\`/del\\_exchange <nom>\`\n\n` +
+    `*Mes Stratégies Perso:*\n` +
+    `\`/add\\_my\\_strategy <wallet> <min> <max> \\[desc\\]\`\n` +
+    `\`/del\\_my\\_strategy <id>\`\n\n` +
+    `*Export:*\n` +
+    `\`/export <strategy\\_id>\``;
+
+  ctx.replyWithMarkdownV2(msg, Markup.inlineKeyboard([
+    [
+      Markup.button.callback('📡 Mes Stratégies', 'menu_status'),
+      Markup.button.callback('🔙 Menu Principal', 'menu_start'),
+    ],
+  ]));
+}
+
+/** Envoie la liste des stratégies avec boutons Pause/Resume/Delete/Export */
+function sendStatus(ctx) {
+  const strategies = getStrategies(String(ctx.from.id));
+
+  if (!strategies.length) {
+    return ctx.reply(
+      '📭 Aucune stratégie active.\nUtilise les boutons ci-dessous pour en créer une.',
+      Markup.inlineKeyboard([
+        [
+          Markup.button.callback('➕ Standard', 'menu_add_standard'),
+          Markup.button.callback('🔗 Chain', 'menu_add_chain'),
+        ],
+        [Markup.button.callback('🔙 Menu', 'menu_start')],
+      ])
+    );
+  }
+
+  const msg = formatStatus(strategies);
+
+  // Boutons par stratégie
+  const buttons = strategies.map((s) => {
+    const statusIcon  = s.active ? '⏸️' : '▶️';
+    const actionLabel = s.active ? `Pause [${s.id}]` : `Resume [${s.id}]`;
+    const actionCb    = s.active ? `pause_${s.id}` : `resume_${s.id}`;
+
+    return [
+      Markup.button.callback(statusIcon + ' ' + actionLabel, actionCb),
+      Markup.button.callback(`🗑️ Del [${s.id}]`, `delete_${s.id}`),
+      Markup.button.callback(`📤 CSV [${s.id}]`, `export_${s.id}`),
+    ];
+  });
+
+  buttons.push([
+    Markup.button.callback('➕ Standard', 'menu_add_standard'),
+    Markup.button.callback('🔗 Chain', 'menu_add_chain'),
+    Markup.button.callback('🔙 Menu', 'menu_start'),
+  ]);
+
+  ctx.replyWithMarkdownV2(msg, Markup.inlineKeyboard(buttons));
+}
+
+/** Envoie la liste des exchanges avec bouton Supprimer par exchange */
+function sendExchanges(ctx) {
+  const list = getExchanges(ctx.from.id);
+
+  if (!list.length) {
+    return ctx.reply(
+      '📭 Aucun exchange enregistré.',
+      Markup.inlineKeyboard([
+        [Markup.button.callback('➕ Ajouter Exchange', 'menu_add_exchange')],
+        [Markup.button.callback('🔙 Menu', 'menu_start')],
+      ])
+    );
+  }
+
+  let msg = `🏦 *Exchanges enregistrés \\(${list.length}\\):*\n\n`;
+  for (const e of list) {
+    msg += `*${esc(e.name)}*\n\`${esc(e.wallet)}\`\n`;
+    if (e.notes) msg += `_${esc(e.notes)}_\n`;
+    msg += '\n';
+  }
+
+  const delButtons = list.map((e) =>
+    [Markup.button.callback(`🗑️ Suppr ${e.name}`, `del_exchange_${encodeURIComponent(e.name)}`)]
+  );
+  delButtons.push([
+    Markup.button.callback('➕ Ajouter', 'menu_add_exchange'),
+    Markup.button.callback('🔙 Menu', 'menu_start'),
+  ]);
+
+  ctx.replyWithMarkdownV2(msg.trim(), Markup.inlineKeyboard(delButtons));
+}
+
+/** Envoie les stratégies perso */
+function sendMyStrategies(ctx) {
+  const list = getUserStrategies(ctx.from.id);
+
+  if (!list.length) {
+    return ctx.reply(
+      '📭 Aucune stratégie perso.',
+      Markup.inlineKeyboard([
+        [Markup.button.callback('➕ Ajouter Strat Perso', 'menu_my_strategy')],
+        [Markup.button.callback('🔙 Menu', 'menu_start')],
+      ])
+    );
+  }
+
+  let msg = `📋 *Mes Stratégies \\(${list.length}\\):*\n\n`;
+  for (const s of list) {
+    msg +=
+      `*ID ${s.id}* — \`${esc(s.wallet)}\`\n` +
+      `Range: ${esc(s.min_sol)} — ${esc(s.max_sol)} SOL\n`;
+    if (s.description) msg += `_${esc(s.description)}_\n`;
+    msg += '\n';
+  }
+
+  const delButtons = list.map((s) =>
+    [Markup.button.callback(`🗑️ Suppr [${s.id}]`, `confirm_del_mystrat_${s.id}`)]
+  );
+  delButtons.push([Markup.button.callback('🔙 Menu', 'menu_start')]);
+
+  ctx.replyWithMarkdownV2(msg.trim(), Markup.inlineKeyboard(delButtons));
+}
+
+/** Effectue la mise en pause */
+async function doPause(ctx, id, restartEngines) {
+  const s = getStrategyById(id);
+  if (!s || String(s.user_id) !== String(ctx.from.id)) {
+    return ctx.reply('❌ Stratégie introuvable.');
+  }
+
+  toggleStrategy(id, false);
+  await restartEngines();
+
+  ctx.reply(
+    `⏸️ Stratégie \\[${id}\\] *${esc(s.label)}* mise en pause\\.`,
+    {
+      parse_mode: 'MarkdownV2',
+      ...Markup.inlineKeyboard([
+        [
+          Markup.button.callback(`▶️ Resume [${id}]`, `resume_${id}`),
+          Markup.button.callback('📡 Voir Stratégies', 'menu_status'),
+        ],
+      ]),
+    }
+  );
+}
+
+/** Effectue la reprise */
+async function doResume(ctx, id, restartEngines) {
+  const s = getStrategyById(id);
+  if (!s || String(s.user_id) !== String(ctx.from.id)) {
+    return ctx.reply('❌ Stratégie introuvable.');
+  }
+
+  toggleStrategy(id, true);
+  await restartEngines();
+
+  ctx.reply(
+    `✅ Stratégie \\[${id}\\] *${esc(s.label)}* réactivée\\.`,
+    {
+      parse_mode: 'MarkdownV2',
+      ...Markup.inlineKeyboard([
+        [
+          Markup.button.callback(`⏸️ Pause [${id}]`, `pause_${id}`),
+          Markup.button.callback('📡 Voir Stratégies', 'menu_status'),
+        ],
+      ]),
+    }
+  );
+}
+
+/** Effectue l'export CSV */
+async function doExport(ctx, stratId) {
+  const strategy = getStrategyById(stratId);
+  if (!strategy || String(strategy.user_id) !== String(ctx.from.id)) {
+    return ctx.reply('❌ Stratégie introuvable.');
+  }
+
+  const rows = getTrackedTxsByStrategy(stratId);
+
+  if (!rows.length) {
+    return ctx.reply(
+      `📭 Aucune transaction trackée pour la stratégie \\[${stratId}\\]\\.`,
+      {
+        parse_mode: 'MarkdownV2',
+        ...Markup.inlineKeyboard([[Markup.button.callback('🔙 Menu', 'menu_start')]]),
+      }
+    );
+  }
+
+  try {
+    const label    = strategy.label || `strategy_${stratId}`;
+    const filePath = generateCsv(rows, label);
+
+    await ctx.replyWithDocument(
+      { source: filePath, filename: filePath.split('/').pop() },
+      {
+        caption: `📊 Export CSV — Stratégie [${stratId}] — ${rows.length} tx`,
+        ...Markup.inlineKeyboard([[Markup.button.callback('📡 Voir Stratégies', 'menu_status')]]),
+      }
+    );
+
+    fs.unlink(filePath, () => {});
+  } catch (err) {
+    logger.error(`[CMD] export erreur: ${err.message}`);
+    ctx.reply(`❌ Erreur lors de l'export: ${err.message}`);
+  }
+}
+
+// ── Callback: suppression exchange inline ────────────────────────────────────
+// Note: ce handler doit être en dehors de registerCommands pour accéder à bot
+// On l'ajoute dans registerCommands via une closure
+
+function registerExchangeDeleteCallbacks(bot) {
+  bot.action(/^del_exchange_(.+)$/, (ctx) => {
+    ctx.answerCbQuery('Suppression...');
+    const name = decodeURIComponent(ctx.match[1]);
+    deleteExchange(ctx.from.id, name);
+
+    ctx.editMessageText(
+      `🗑️ Exchange *"${esc(name)}"* supprimé\\.`,
+      {
+        parse_mode: 'MarkdownV2',
+        ...Markup.inlineKeyboard([
+          [
+            Markup.button.callback('🏦 Voir Exchanges', 'menu_exchanges'),
+            Markup.button.callback('🔙 Menu', 'menu_start'),
+          ],
+        ]),
+      }
+    ).catch(() => ctx.reply(`🗑️ Exchange "${name}" supprimé.`));
+  });
+}
+
+// Patch registerCommands pour inclure les callbacks exchange
+const _registerCommands = registerCommands;
+module.exports = {
+  registerCommands: (bot, restartEngines) => {
+    _registerCommands(bot, restartEngines);
+    registerExchangeDeleteCallbacks(bot);
+  },
+  authGuard,
+};
