@@ -53,8 +53,9 @@ const esc = (t) => String(t).replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, '\\$&');
  * Enregistre toutes les commandes sur l'instance Telegraf.
  * @param {import('telegraf').Telegraf} bot
  * @param {Function} restartEngines
+ * @param {import('telegraf').Scenes.Stage} stage
  */
-function registerCommands(bot, restartEngines) {
+function registerCommands(bot, restartEngines, stage) {
 
   bot.use(authGuard);
 
@@ -158,23 +159,13 @@ function registerCommands(bot, restartEngines) {
   });
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // /add_standard
+  // /add_standard — lance le wizard si pas d'args, sinon traite direct
   // ═══════════════════════════════════════════════════════════════════════════
 
   bot.command('add_standard', async (ctx) => {
     const args = ctx.message.text.split(/\s+/).slice(1);
-
-    if (args.length < 3) {
-      return ctx.reply(
-        '📝 *Ajouter une stratégie Standard*\n\n' +
-        'Format:\n`/add_standard <wallet> <min_sol> <max_sol> [label] [fresh_only] [tradewiz]`\n\n' +
-        'Exemple:\n`/add_standard ABC...XYZ 1.057 1.058 "Alpha" true "Bot1"`',
-        {
-          parse_mode: 'Markdown',
-          ...Markup.inlineKeyboard([[Markup.button.callback('🔙 Menu Principal', 'menu_start')]]),
-        }
-      );
-    }
+    // Pas d'args → wizard
+    if (args.length < 3) return ctx.scene.enter('ADD_STANDARD_WIZARD');
 
     const [wallet, minStr, maxStr, label = '', freshStr = 'false', tradewiz_name = ''] = args;
     const min_sol    = parseFloat(minStr);
@@ -223,23 +214,13 @@ function registerCommands(bot, restartEngines) {
   });
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // /add_chain
+  // /add_chain — lance le wizard si pas d'args, sinon traite direct
   // ═══════════════════════════════════════════════════════════════════════════
 
   bot.command('add_chain', async (ctx) => {
     const args = ctx.message.text.split(/\s+/).slice(1);
-
-    if (args.length < 2) {
-      return ctx.reply(
-        '📝 *Ajouter un Chain Tracker*\n\n' +
-        'Format:\n`/add_chain <wallet> <max_hops> [min_sol] [max_sol] [label] [fresh_only] [tradewiz]`\n\n' +
-        'Exemple:\n`/add_chain ABC...XYZ 3 0.5 2.0 "Mother" true "Bot1"`',
-        {
-          parse_mode: 'Markdown',
-          ...Markup.inlineKeyboard([[Markup.button.callback('🔙 Menu Principal', 'menu_start')]]),
-        }
-      );
-    }
+    // Pas d'args → wizard
+    if (args.length < 2) return ctx.scene.enter('ADD_CHAIN_WIZARD');
 
     const [wallet, hopsStr, minStr = '0', maxStr = '9999', label = '', freshStr = 'false', tradewiz_name = ''] = args;
     const max_hops   = parseInt(hopsStr, 10);
@@ -572,33 +553,12 @@ function registerCommands(bot, restartEngines) {
 
   bot.action('menu_add_standard', (ctx) => {
     ctx.answerCbQuery();
-    ctx.reply(
-      '📝 *Ajouter une stratégie Standard*\n\n' +
-      'Envoie la commande avec le format suivant:\n\n' +
-      '`/add_standard <wallet> <min_sol> <max_sol> [label] [fresh_only] [tradewiz]`\n\n' +
-      '📌 *Exemple:*\n`/add_standard ABC...XYZ 1.057 1.058 "Dev Alpha" true "Bot1"`\n\n' +
-      '• `fresh_only` = `true` pour ignorer les anciens wallets\n' +
-      '• `tradewiz` = nom du bot TradeWiz \\(optionnel\\)',
-      {
-        parse_mode: 'MarkdownV2',
-        ...Markup.inlineKeyboard([[Markup.button.callback('🔙 Menu', 'menu_start')]]),
-      }
-    );
+    ctx.scene.enter('ADD_STANDARD_WIZARD');
   });
 
   bot.action('menu_add_chain', (ctx) => {
     ctx.answerCbQuery();
-    ctx.reply(
-      '🔗 *Ajouter un Chain Tracker*\n\n' +
-      'Envoie la commande avec le format suivant:\n\n' +
-      '`/add_chain <wallet> <max_hops> [min_sol] [max_sol] [label] [fresh_only] [tradewiz]`\n\n' +
-      '📌 *Exemple:*\n`/add_chain ABC...XYZ 3 0.5 2.0 "Mother" true "Chain1"`\n\n' +
-      '• `max_hops` = nombre de sauts max \\(1\\-10\\)',
-      {
-        parse_mode: 'MarkdownV2',
-        ...Markup.inlineKeyboard([[Markup.button.callback('🔙 Menu', 'menu_start')]]),
-      }
-    );
+    ctx.scene.enter('ADD_CHAIN_WIZARD');
   });
 
   bot.action('menu_add_backtest', (ctx) => {

@@ -15,7 +15,7 @@
 
 require('dotenv').config();
 
-const { Telegraf }         = require('telegraf');
+const { Telegraf, Scenes, session } = require('telegraf');
 const logger               = require('./utils/logger');
 const { initDB,
         getActiveStrategies } = require('./db/database');
@@ -23,6 +23,7 @@ const rpcSubscriber        = require('./engines/rpcSubscriber');
 const StandardEngine       = require('./engines/standardEngine');
 const ChainEngine          = require('./engines/chainEngine');
 const { registerCommands } = require('./handlers/commands');
+const { addStandardWizard, addChainWizard } = require('./handlers/scenes');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Validation de l'environnement
@@ -106,8 +107,22 @@ async function main() {
   await rpcSubscriber.start();
   logger.info('[Boot] ✅ Subscriber WebSocket Solana prêt');
 
-  // 6. Commandes Telegram
-  registerCommands(bot, restartEngines);
+  // 6. Scenes (wizards) — doivent être avant les commandes
+  const stage = new Scenes.Stage([addStandardWizard, addChainWizard]);
+  // Injecte restartEngines dans le state de chaque scene
+  addStandardWizard.use((ctx, next) => {
+    ctx.scene.state.onCreate = () => restartEngines();
+    return next();
+  });
+  addChainWizard.use((ctx, next) => {
+    ctx.scene.state.onCreate = () => restartEngines();
+    return next();
+  });
+  bot.use(session());
+  bot.use(stage.middleware());
+
+  // 7. Commandes Telegram
+  registerCommands(bot, restartEngines, stage);
 
   // 7. Démarrage initial des moteurs
   await restartEngines();

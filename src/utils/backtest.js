@@ -135,33 +135,48 @@ async function runBacktest(walletAddress, signature, maxHops = MAX_HOPS_BACKTEST
 
 /**
  * Cherche la prochaine transaction sortante d'un wallet après une signature donnée.
- * On utilise getSignaturesForAddress avec un filtre "after" pour ne pas re-parser les anciennes.
+ *
+ * getSignaturesForAddress retourne les tx du plus récent au plus ancien.
+ * - "before" = signature pivot → retourne les tx PLUS ANCIENNES que ce pivot
+ * - "until"  = stop quand on atteint cette signature (ne l'inclut pas)
+ *
+ * On veut les tx APRÈS afterSignature (plus récentes).
+ * Donc : on récupère un lot sans "before/after", et on filtre manuellement
+ * en cherchant la tx juste après afterSignature dans la liste triée DESC.
  *
  * @param {string} walletAddress
- * @param {string} afterSignature - On cherche les tx APRÈS cette signature
- * @returns {Promise<string|null>} - Signature de la prochaine tx sortante, ou null
+ * @param {string} afterSignature - Signature de la tx précédente
+ * @returns {Promise<string|null>}
  */
 async function _findNextOutboundTx(walletAddress, afterSignature) {
   try {
     const connection = getConnection();
     const pubkey = new PublicKey(walletAddress);
 
-    // Récupère les 10 premières tx après la signature donnée
-    const sigs = await connection.getSignaturesForAddress(pubkey, {
-      limit: 10,
-      after: afterSignature,
-    });
+    // Récupère les 20 tx les plus récentes du wallet
+    // La liste est triée du plus récent (index 0) au plus ancien (index N)
+    const sigs = await connection.getSignaturesForAddress(pubkey, { limit: 20 });
 
     if (!sigs || sigs.length === 0) return null;
 
-    // Prend la plus ancienne (index le plus élevé dans le tableau trié DESC)
-    // qui n'est pas en erreur
-    for (let i = sigs.length - 1; i >= 0; i--) {
-      if (!sigs[i].err) {
-        return sigs[i].signature;
+    // Trouve l'index de afterSignature dans la liste
+    const pivotIdx = sigs.findIndex((s) => s.signature === afterSignature);
+
+    if (pivotIdx === -1) {
+      // afterSignature pas dans les 20 dernières → trop vieux, prend la plus ancienne dispo
+      for (let i = sigs.length - 1; i >= 0; i--) {
+        if (!sigs[i].err) return sigs[i].signature;
       }
+      return null;
     }
 
+    // La tx "suivante" (plus récente que le pivot) est à l'index pivotIdx - 1
+    // Car la liste est DESC (plus récent en premier)
+    for (let i = pivotIdx - 1; i >= 0; i--) {
+      if (!sigs[i].err) return sigs[i].signature;
+    }
+
+    // Aucune tx plus récente trouvée → wallet final
     return null;
   } catch (err) {
     logger.warn(`[Backtest] _findNextOutboundTx erreur: ${err.message}`);
