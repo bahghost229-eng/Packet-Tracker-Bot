@@ -52,7 +52,9 @@ async function runBacktest(walletAddress, signature, maxHops = MAX_HOPS_BACKTEST
     }
 
     const transfers = extractParsedInstructions(tx);
-    const initialTransfer = transfers.find((t) => t.from === walletAddress);
+
+    // Prend le transfert SORTANT le plus important (exclut les tips < 0.01 SOL)
+    const initialTransfer = _pickMainOutbound(transfers, walletAddress);
 
     if (!initialTransfer) {
       result.error = `Aucun transfert SOL sortant de ${walletAddress} dans cette tx.`;
@@ -89,9 +91,8 @@ async function runBacktest(walletAddress, signature, maxHops = MAX_HOPS_BACKTEST
       if (!nextTx) break;
 
       const nextTransfers = extractParsedInstructions(nextTx);
-      const outbound = nextTransfers.find(
-        (t) => t.from === currentWallet && !visited.has(t.to)
-      );
+      // Prend le plus gros transfert sortant (ignore les tips Jito < 0.01 SOL)
+      const outbound = _pickMainOutbound(nextTransfers, currentWallet, visited);
 
       if (!outbound) {
         result.finalWallet = currentWallet;
@@ -131,6 +132,50 @@ async function runBacktest(walletAddress, signature, maxHops = MAX_HOPS_BACKTEST
   }
 
   return result;
+}
+
+// Adresses connues à ignorer : Jito tips, System programs, etc.
+const JITO_TIP_ACCOUNTS = new Set([
+  '96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5',
+  'HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe',
+  'Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY',
+  'ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1IfygL5kd9',
+  'DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh',
+  'ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt',
+  'HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe',
+  'DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL',
+  '3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT',
+]);
+
+/**
+ * Choisit le transfert sortant principal depuis un wallet.
+ * Stratégie :
+ *   1. Filtre par expéditeur = walletAddress
+ *   2. Exclut les wallets déjà visités (anti-boucle)
+ *   3. Exclut les adresses Jito tip connues
+ *   4. Exclut les montants < MIN_MEANINGFUL_SOL (tips/frais)
+ *   5. Prend le transfert avec le plus grand montant SOL
+ *
+ * @param {Array} transfers
+ * @param {string} walletAddress
+ * @param {Set<string>} [visited]
+ * @returns {object|null}
+ */
+function _pickMainOutbound(transfers, walletAddress, visited = new Set()) {
+  // Seuil minimum : ignore tout < 0.001 SOL (frais, tips)
+  const MIN_SOL = 0.001;
+
+  const candidates = transfers
+    .filter((t) =>
+      t.from === walletAddress &&
+      !visited.has(t.to) &&
+      !JITO_TIP_ACCOUNTS.has(t.to) &&
+      t.amountSol >= MIN_SOL
+    )
+    // Trie par montant décroissant → le plus gros d'abord
+    .sort((a, b) => b.amountSol - a.amountSol);
+
+  return candidates[0] || null;
 }
 
 /**
@@ -203,9 +248,9 @@ function formatBacktestResult(result) {
     const freshTag = step.isFresh ? '🟢' : '🔴';
     msg +=
       `\n*Hop ${esc(step.hop)}* ${freshTag}\n` +
-      `  └ \`${esc(step.from.slice(0,8))}...\` → \`${esc(step.to)}\`\n` +
-      `     ${esc(step.amountSol.toFixed(6))} SOL\n` +
-      `     [Solscan](https://solscan.io/tx/${esc(step.signature)})\n`;
+      `  \`${esc(step.from.slice(0,8))}\\.\\.\\.\` → \`${esc(step.to.slice(0,8))}\\.\\.\\.\`\n` +
+      `  💰 ${esc(step.amountSol.toFixed(6))} SOL\n` +
+      `  [🔗 Solscan](https://solscan\\.io/tx/${esc(step.signature)})\n`;
   }
 
   const finalFresh = result.path[result.path.length - 1]?.isFresh;
@@ -214,8 +259,8 @@ function formatBacktestResult(result) {
   msg +=
     `\n🎯 *Dev Wallet Final:*\n` +
     `\`${esc(result.finalWallet)}\`\n` +
-    `${freshTag}\n` +
-    `\n[Voir sur Solscan](https://solscan.io/address/${esc(result.finalWallet)})`;
+    `${freshTag}\n\n` +
+    `[📊 Voir sur Solscan](https://solscan\\.io/address/${esc(result.finalWallet)})`;
 
   return msg;
 }
