@@ -114,12 +114,33 @@ async function main() {
 
   // 8. Lancement du bot (long polling)
   logger.info('[Boot] Tentative bot.launch()...');
-  await bot.launch().catch((err) => {
+
+  // Garde le process en vie même si bot.launch() resolve tôt
+  let botStopped = false;
+  bot.launch({
+    allowedUpdates: ['message', 'callback_query'],
+  }).then(() => {
+    if (!botStopped) {
+      logger.warn('[Boot] bot.launch() a terminé de manière inattendue — redémarrage...');
+      process.exit(1);
+    }
+  }).catch((err) => {
     logger.error(`[Boot] ❌ bot.launch() ÉCHEC: ${err.message}`);
-    logger.error(`[Boot] → Vérifie TELEGRAM_BOT_TOKEN dans ton .env`);
-    logger.error(`[Boot] → curl https://api.telegram.org/bot<TOKEN>/getMe`);
+    if (err.message.includes('409')) {
+      logger.error('[Boot] → 409 Conflict: une autre instance tourne déjà.');
+      logger.error('[Boot] → Tue tous les process node: pkill -f "node src/index"');
+    } else if (err.message.includes('401')) {
+      logger.error('[Boot] → 401 Unauthorized: token invalide dans .env');
+    }
     process.exit(1);
   });
+
+  // Attends que le bot soit vraiment prêt (getMe confirme la connexion)
+  await bot.telegram.getMe().catch((err) => {
+    logger.error(`[Boot] ❌ getMe() ÉCHEC: ${err.message}`);
+    process.exit(1);
+  });
+
   logger.info('[Boot] ✅ Bot Telegram actif (long polling)');
 
   // ── Notification de démarrage aux admins ───────────────────────────────
@@ -141,6 +162,7 @@ async function main() {
   // ── Gestion des signaux OS ─────────────────────────────────────────────
 
   async function shutdown(signal) {
+    botStopped = true;
     logger.info(`[Shutdown] Signal ${signal} reçu — arrêt propre...`);
     standardEngine.stop();
     chainEngine.stop();
