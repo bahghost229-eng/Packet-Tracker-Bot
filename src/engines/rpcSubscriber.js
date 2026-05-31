@@ -2,94 +2,86 @@
  * rpcSubscriber.js
  * ─────────────────────────────────────────────────────────────────────────────
  * Gestion des souscriptions WebSocket Solana via @solana/web3.js.
- * Supporte:
- *   - onAccountChange  (notification immédiate dès qu'un compte change)
- *   - onLogs           (filter par mention d'une adresse — plus léger)
  *
- * Architecture:
- *   - Un Map<walletAddress, Set<subscriptionId>> pour tracker les sub actifs
- *   - Reconnexion automatique exponentielle en cas de drop WSS
- *   - Event emitter central que les engines Standard & Chain écoutent
+ * Corrections v1.1:
+ *   - Backoff exponentiel global persistant (ne reset plus entre cycles)
+ *   - Détection 401 WSS: arrêt immédiat + message d'erreur explicite
+ *   - resetConnection() appelé avant toute reconnexion (force nouveau handshake)
+ *   - Guard: si aucune clé API valide, on refuse de boucler indéfiniment
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
 'use strict';
 
-const { EventEmitter }    = require('events');
-const { PublicKey }       = require('@solana/web3.js');
-const { getConnection }   = require('../utils/solana');
-const logger              = require('../utils/logger');
+const { EventEmitter }              = require('events');
+const { PublicKey }                 = require('@solana/web3.js');
+const { getConnection,
+        resetConnection }           = require('../utils/solana');
+const logger                        = require('../utils/logger');
 
-const RECONNECT_DELAY_MS  = parseInt(process.env.WS_RECONNECT_DELAY_MS || '3000', 10);
-const MAX_RECONNECT_DELAY = 60_000; // 1 minute plafond
+const RECONNECT_DELAY_MS  = parseInt(process.env.WS_RECONNECT_DELAY_MS || '5000', 10);
+const MAX_RECONNECT_DELAY = 120_000; // 2 minutes plafond
+const PING_INTERVAL_MS    = 30_000;
+const MAX_RECONNECT_ATTEMPTS = 10;  // Au-delà → on stoppe pour éviter le spam
 
 class RpcSubscriber extends EventEmitter {
   constructor() {
     super();
-    this.setMaxListeners(200); // beaucoup de wallets potentiels
+    this.setMaxListeners(200);
 
     /** @type {Map<string, number>} wallet → subscriptionId */
     this._subs = new Map();
 
-    /** @type {Map<string, number>} wallet → reconnect attempt count */
-    this._reconnectCounts = new Map();
+    this._connection        = null;
+    this._reconnectTimer    = null;
+    this._isShuttingDown    = false;
+    this._pingTimer         = null;
 
-    this._connection = null;
-    this._reconnectTimer = null;
-    this._isShuttingDown = false;
+    // Compteur global de tentatives de reconnexion (persistant entre cycles)
+    this._reconnectAttempts = 0;
+    this._isReconnecting    = false; // Évite les reconnexions parallèles
   }
 
   // ──────────────────────────────────────────────────────────────────────────
-  // PUBLIC API
+  // PUBLIC
   // ──────────────────────────────────────────────────────────────────────────
 
-  /**
-   * Démarre le subscriber (initialise la connexion).
-   */
   async start() {
     this._isShuttingDown = false;
+    this._reconnectAttempts = 0;
     this._connection = getConnection();
-    this._setupConnectionMonitor();
+    this._startPing();
     logger.info('[RpcSubscriber] Démarré');
   }
 
-  /**
-   * Abonne un wallet à la surveillance.
-   * Utilise onLogs (filter: "mentions") pour capter toutes les tx impliquant l'adresse.
-   *
-   * @param {string} walletAddress
-   */
   subscribe(walletAddress) {
     if (this._subs.has(walletAddress)) {
       logger.debug(`[RpcSubscriber] Déjà souscrit: ${walletAddress}`);
       return;
     }
+    if (!this._connection) {
+      logger.warn('[RpcSubscriber] subscribe() appelé sans connexion active');
+      return;
+    }
 
     try {
       const pubkey = new PublicKey(walletAddress);
-      const conn   = this._connection;
 
-      const subId = conn.onLogs(
+      const subId = this._connection.onLogs(
         pubkey,
         (logs, context) => this._handleLogs(walletAddress, logs, context),
         'confirmed'
       );
 
       this._subs.set(walletAddress, subId);
-      this._reconnectCounts.set(walletAddress, 0);
-      logger.info(`[RpcSubscriber] Souscription active: ${walletAddress} (subId=${subId})`);
+      logger.info(`[RpcSubscriber] ✅ Souscription active: ${walletAddress} (subId=${subId})`);
     } catch (err) {
       logger.error(`[RpcSubscriber] subscribe() erreur pour ${walletAddress}: ${err.message}`);
     }
   }
 
-  /**
-   * Désabonne un wallet.
-   * @param {string} walletAddress
-   */
   async unsubscribe(walletAddress) {
     if (!this._subs.has(walletAddress)) return;
-
     const subId = this._subs.get(walletAddress);
     try {
       await this._connection.removeOnLogsListener(subId);
@@ -98,26 +90,19 @@ class RpcSubscriber extends EventEmitter {
       logger.warn(`[RpcSubscriber] unsubscribe() erreur: ${err.message}`);
     } finally {
       this._subs.delete(walletAddress);
-      this._reconnectCounts.delete(walletAddress);
     }
   }
 
-  /**
-   * Désabonne tous les wallets et stoppe le subscriber.
-   */
   async stop() {
     this._isShuttingDown = true;
     if (this._reconnectTimer) clearTimeout(this._reconnectTimer);
+    if (this._pingTimer)      clearTimeout(this._pingTimer);
 
     const addresses = [...this._subs.keys()];
     await Promise.allSettled(addresses.map((a) => this.unsubscribe(a)));
     logger.info('[RpcSubscriber] Arrêté');
   }
 
-  /**
-   * Retourne les wallets actuellement surveillés.
-   * @returns {string[]}
-   */
   getSubscribedWallets() {
     return [...this._subs.keys()];
   }
@@ -126,92 +111,116 @@ class RpcSubscriber extends EventEmitter {
   // PRIVATE
   // ──────────────────────────────────────────────────────────────────────────
 
-  /**
-   * Handler appelé par onLogs dès qu'une transaction mentionne le wallet.
-   */
   _handleLogs(walletAddress, logs, context) {
-    if (logs.err) {
-      // Transaction échouée → on ignore
-      return;
-    }
+    if (logs.err) return; // Tx échouée → ignore
 
-    const { signature } = logs;
+    logger.debug(`[RpcSubscriber] Tx détectée pour ${walletAddress}: ${logs.signature}`);
 
-    logger.debug(`[RpcSubscriber] Tx détectée pour ${walletAddress}: ${signature}`);
-
-    /**
-     * On émet un event "tx" que les engines vont écouter.
-     * On ne parse pas ici pour ne pas bloquer le handler WSS.
-     * Le parsing complet est délégué de façon asynchrone aux engines.
-     */
     this.emit('tx', {
       walletAddress,
-      signature,
-      slot: context.slot,
+      signature: logs.signature,
+      slot:      context.slot,
     });
   }
 
   /**
-   * Surveille la santé de la connexion WebSocket et reconnecte si nécessaire.
-   * @solana/web3.js gère sa propre reconnexion interne, mais on ajoute une
-   * couche supplémentaire pour forcer la re-souscription après drop prolongé.
+   * Ping HTTP RPC toutes les 30s.
+   * Si ça échoue → reconnexion. Si 401 WSS détecté → log clair et stop.
    */
-  _setupConnectionMonitor() {
-    // Ping toutes les 30s pour détecter les drops silencieux
-    const PING_INTERVAL = 30_000;
-
+  _startPing() {
     const ping = async () => {
       if (this._isShuttingDown) return;
+
       try {
         await this._connection.getSlot('finalized');
-        logger.debug('[RpcSubscriber] ❤️ Connexion RPC OK');
+        // Ping OK → reset le compteur de tentatives
+        if (this._reconnectAttempts > 0) {
+          logger.info('[RpcSubscriber] ❤️ RPC de nouveau opérationnel — reset backoff');
+          this._reconnectAttempts = 0;
+        }
+        logger.debug('[RpcSubscriber] ❤️ Ping RPC OK');
       } catch (err) {
-        logger.warn('[RpcSubscriber] ⚠️ Ping RPC échoué, reconnexion...');
+        const msg = err.message || '';
+
+        // 401 = clé API invalide/expirée → inutile de boucler
+        if (msg.includes('401') || msg.includes('Unauthorized') || msg.includes('403')) {
+          logger.error(
+            '[RpcSubscriber] 🔴 ERREUR 401/403 — Clé API Helius invalide ou expirée.\n' +
+            '  → Vérifie HELIUS_API_KEY et HELIUS_RPC_WSS dans ton .env\n' +
+            '  → Regénère ta clé sur https://dev.helius.xyz/dashboard'
+          );
+          // On stoppe les reconnexions automatiques pour ne pas spammer
+          this._isShuttingDown = true;
+          return;
+        }
+
+        logger.warn(`[RpcSubscriber] ⚠️ Ping RPC échoué (${msg}) — tentative de reconnexion...`);
         await this._reconnectAll();
       }
-      setTimeout(ping, PING_INTERVAL);
+
+      // Planifie le prochain ping seulement si on n'est pas en shutdown
+      if (!this._isShuttingDown) {
+        this._pingTimer = setTimeout(ping, PING_INTERVAL_MS);
+      }
     };
 
-    setTimeout(ping, PING_INTERVAL);
+    this._pingTimer = setTimeout(ping, PING_INTERVAL_MS);
   }
 
   /**
-   * Reconnecte toutes les souscriptions (ex: après drop réseau).
+   * Reconnecte toutes les souscriptions avec backoff exponentiel persistant.
    */
   async _reconnectAll() {
-    if (this._isShuttingDown) return;
+    if (this._isShuttingDown || this._isReconnecting) return;
+
+    this._isReconnecting = true;
+    this._reconnectAttempts++;
 
     const wallets = [...this._subs.keys()];
-    logger.warn(`[RpcSubscriber] Reconnexion de ${wallets.length} wallet(s)...`);
+    logger.warn(`[RpcSubscriber] Reconnexion de ${wallets.length} wallet(s)... (tentative ${this._reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`);
 
-    // Annule toutes les subs actuelles sans émettre d'erreur
+    // Plafond de tentatives pour éviter le spam infini
+    if (this._reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
+      logger.error(
+        `[RpcSubscriber] 🔴 ${MAX_RECONNECT_ATTEMPTS} tentatives épuisées.\n` +
+        '  → Vérifier la connexion réseau et la clé API RPC.\n' +
+        '  → Redémarre le bot manuellement.'
+      );
+      this._isReconnecting = false;
+      return;
+    }
+
+    // Annule les subs actuelles
     for (const [addr, subId] of this._subs.entries()) {
-      try {
-        await this._connection.removeOnLogsListener(subId);
-      } catch {}
+      try { await this._connection.removeOnLogsListener(subId); } catch {}
       this._subs.delete(addr);
     }
 
-    // Recalcule le délai exponentiel
-    const attemptKey = '_global';
-    const count = (this._reconnectCounts.get(attemptKey) || 0) + 1;
-    this._reconnectCounts.set(attemptKey, count);
-    const delay = Math.min(RECONNECT_DELAY_MS * Math.pow(2, count - 1), MAX_RECONNECT_DELAY);
+    // Backoff exponentiel: 5s, 10s, 20s, 40s ... plafonné à 2min
+    const delay = Math.min(
+      RECONNECT_DELAY_MS * Math.pow(2, this._reconnectAttempts - 1),
+      MAX_RECONNECT_DELAY
+    );
 
-    logger.info(`[RpcSubscriber] Attente ${delay}ms avant reconnexion (tentative ${count})`);
+    logger.info(`[RpcSubscriber] ⏳ Attente ${delay / 1000}s avant reconnexion (tentative ${this._reconnectAttempts})`);
 
-    this._reconnectTimer = setTimeout(() => {
-      // Re-crée la connexion
-      this._connection = getConnection();
+    this._reconnectTimer = setTimeout(async () => {
+      try {
+        // Force un nouveau handshake complet
+        resetConnection();
+        this._connection = getConnection();
 
-      // Re-souscrit tous les wallets
-      for (const addr of wallets) {
-        this.subscribe(addr);
+        // Re-souscrit tous les wallets
+        for (const addr of wallets) {
+          this.subscribe(addr);
+        }
+
+        logger.info(`[RpcSubscriber] ✅ Re-souscriptions terminées (${wallets.length} wallet(s))`);
+      } catch (err) {
+        logger.error(`[RpcSubscriber] Reconnexion échouée: ${err.message}`);
+      } finally {
+        this._isReconnecting = false;
       }
-
-      // Reset le compteur si succès
-      this._reconnectCounts.set(attemptKey, 0);
-      logger.info('[RpcSubscriber] Re-souscriptions terminées');
     }, delay);
   }
 }

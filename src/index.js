@@ -28,12 +28,25 @@ const { registerCommands } = require('./handlers/commands');
 // Validation de l'environnement
 // ─────────────────────────────────────────────────────────────────────────────
 
-const REQUIRED_ENV = ['TELEGRAM_BOT_TOKEN', 'HELIUS_RPC_HTTP', 'HELIUS_RPC_WSS'];
+const REQUIRED_ENV = ['TELEGRAM_BOT_TOKEN', 'HELIUS_API_KEY', 'HELIUS_RPC_HTTP', 'HELIUS_RPC_WSS'];
 for (const key of REQUIRED_ENV) {
   if (!process.env[key]) {
-    logger.error(`Variable d'environnement manquante: ${key}`);
+    logger.error(`❌ Variable d'environnement manquante: ${key}`);
+    logger.error('   → Copie .env.example en .env et remplis toutes les valeurs');
     process.exit(1);
   }
+}
+
+// Vérifie que la clé API est bien injectée dans les URLs
+const HTTP_URL = process.env.HELIUS_RPC_HTTP;
+const WSS_URL  = process.env.HELIUS_RPC_WSS;
+const KEY      = process.env.HELIUS_API_KEY;
+
+if (!HTTP_URL.includes(KEY) && !HTTP_URL.includes('api-key')) {
+  logger.warn('⚠️  HELIUS_API_KEY absente de HELIUS_RPC_HTTP — elle sera injectée automatiquement');
+}
+if (!WSS_URL.includes(KEY) && !WSS_URL.includes('api-key')) {
+  logger.warn('⚠️  HELIUS_API_KEY absente de HELIUS_RPC_WSS — elle sera injectée automatiquement');
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -70,17 +83,36 @@ async function main() {
     chainEngine.start(strategies);
   }
 
-  // 4. RPC Subscriber WSS
+  // 4. Test de connectivité RPC avant de démarrer le subscriber
+  logger.info('[Boot] Test de connectivité RPC...');
+  try {
+    const { getConnection } = require('./utils/solana');
+    const slot = await getConnection().getSlot('finalized');
+    logger.info(`[Boot] ✅ RPC opérationnel — slot: ${slot}`);
+  } catch (err) {
+    const msg = err.message || '';
+    if (msg.includes('401') || msg.includes('403')) {
+      logger.error(
+        '❌ ERREUR 401 — Clé API Helius invalide.\n' +
+        '   Vérifie HELIUS_API_KEY dans ton .env\n' +
+        '   Dashboard: https://dev.helius.xyz/dashboard'
+      );
+      process.exit(1);
+    }
+    logger.warn(`[Boot] ⚠️ RPC non disponible au démarrage (${msg}) — le bot va quand même démarrer`);
+  }
+
+  // 5. RPC Subscriber WSS
   await rpcSubscriber.start();
   logger.info('[Boot] ✅ Subscriber WebSocket Solana prêt');
 
-  // 5. Commandes Telegram
+  // 6. Commandes Telegram
   registerCommands(bot, restartEngines);
 
-  // 6. Démarrage initial des moteurs
+  // 7. Démarrage initial des moteurs
   await restartEngines();
 
-  // 7. Lancement du bot (long polling)
+  // 8. Lancement du bot (long polling)
   await bot.launch();
   logger.info('[Boot] ✅ Bot Telegram actif (long polling)');
 

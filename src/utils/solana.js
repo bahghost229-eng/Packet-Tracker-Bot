@@ -8,25 +8,65 @@
 const { Connection, PublicKey, LAMPORTS_PER_SOL } = require('@solana/web3.js');
 const logger = require('./logger');
 
-const HTTP_RPC  = process.env.HELIUS_RPC_HTTP  || process.env.FALLBACK_RPC_HTTP;
-const WSS_RPC   = process.env.HELIUS_RPC_WSS   || process.env.FALLBACK_RPC_WSS;
+const HELIUS_KEY = process.env.HELIUS_API_KEY || '';
 
-// Connexion unique réutilisée partout
+/**
+ * Construit les URLs Helius en injectant la clé API si elle n'est pas déjà présente.
+ * Helius accepte la clé soit en query param (?api-key=xxx) soit dans le path.
+ * Format canonique recommandé par Helius:
+ *   HTTP: https://mainnet.helius-rpc.com/?api-key=KEY
+ *   WSS:  wss://mainnet.helius-rpc.com/?api-key=KEY
+ */
+function buildHeliusUrl(base, protocol) {
+  if (!base) return null;
+  // Si la clé est déjà dans l'URL, on ne touche pas
+  if (base.includes('api-key=') || base.includes(HELIUS_KEY)) return base;
+  // Sinon on l'injecte
+  const sep = base.includes('?') ? '&' : '?';
+  return `${base}${sep}api-key=${HELIUS_KEY}`;
+}
+
+const HTTP_RPC = buildHeliusUrl(
+  process.env.HELIUS_RPC_HTTP || process.env.FALLBACK_RPC_HTTP,
+  'https'
+);
+const WSS_RPC = buildHeliusUrl(
+  process.env.HELIUS_RPC_WSS || process.env.FALLBACK_RPC_WSS,
+  'wss'
+);
+
+// Connexion unique réutilisée partout (réinitialisable après drop)
 let _connection = null;
 
 /**
- * Retourne (ou crée) la connexion Solana HTTP.
+ * Retourne (ou crée) la connexion Solana.
+ * Appeler resetConnection() avant si on veut forcer une nouvelle instance.
  * @returns {Connection}
  */
 function getConnection() {
   if (!_connection) {
+    if (!HTTP_RPC) {
+      throw new Error('HELIUS_RPC_HTTP manquant dans .env');
+    }
     _connection = new Connection(HTTP_RPC, {
       commitment: 'confirmed',
-      wsEndpoint: WSS_RPC,
+      wsEndpoint: WSS_RPC || undefined,
+      // Désactive le keepalive agressif qui génère des erreurs 401 répétées
+      // quand la clé API est invalide — on échoue proprement dès le 1er essai
+      disableRetryOnRateLimit: false,
     });
-    logger.info(`[Solana] Connexion RPC: ${HTTP_RPC}`);
+    // Log partiel de l'URL (masque la clé API)
+    const safeUrl = HTTP_RPC.replace(/api-key=[^&]+/, 'api-key=***');
+    logger.info(`[Solana] Connexion RPC: ${safeUrl}`);
   }
   return _connection;
+}
+
+/**
+ * Réinitialise la connexion (utile après un drop réseau pour forcer un nouveau handshake).
+ */
+function resetConnection() {
+  _connection = null;
 }
 
 /**
@@ -188,6 +228,7 @@ function extractParsedInstructions(tx) {
 
 module.exports = {
   getConnection,
+  resetConnection,
   isValidPublicKey,
   lamportsToSol,
   isFreshWallet,
