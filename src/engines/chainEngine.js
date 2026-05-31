@@ -30,8 +30,9 @@ const { getParsedTransaction,
         getConnection }        = require('../utils/solana');
 const { logTrackedTx,
         isTxAlreadyTracked }   = require('../db/database');
-const { formatChainAlert }     = require('../utils/formatter');
-const logger                   = require('../utils/logger');
+const { formatChainAlert }         = require('../utils/formatter');
+const { sendTradeWizCopyTrade }    = require('../utils/tradewiz');
+const logger                       = require('../utils/logger');
 
 const HOP_TIMEOUT_MS = parseInt(process.env.CHAIN_HOP_TIMEOUT_MS || '30000', 10);
 const limit          = pLimit(3);
@@ -388,6 +389,17 @@ class ChainEngine {
         parse_mode: 'MarkdownV2',
         disable_web_page_preview: true,
       });
+
+      // TradeWiz copy trade (si tradewiz_name configuré)
+      if (strategy.tradewiz_name) {
+        await sendTradeWizCopyTrade(this.bot, {
+          walletAddress: finalWallet,
+          copyTradeName: strategy.tradewiz_name,
+          amountSol,
+          isFresh:       fresh,
+          userId:        strategy.user_id,
+        });
+      }
     } catch (err) {
       logger.error(`[ChainEngine] _finalizeChain erreur: ${err.message}`);
     }

@@ -51,18 +51,19 @@ async function initDB() {
   // Création des tables
   db.run(`
     CREATE TABLE IF NOT EXISTS strategies (
-      id          INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id     TEXT    NOT NULL,
-      type        TEXT    NOT NULL,
-      label       TEXT,
-      wallet      TEXT    NOT NULL,
-      min_sol     REAL,
-      max_sol     REAL,
-      max_hops    INTEGER DEFAULT 5,
-      fresh_only  INTEGER DEFAULT 0,
-      active      INTEGER DEFAULT 1,
-      created_at  TEXT    DEFAULT (datetime('now')),
-      updated_at  TEXT    DEFAULT (datetime('now'))
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id         TEXT    NOT NULL,
+      type            TEXT    NOT NULL,
+      label           TEXT,
+      wallet          TEXT    NOT NULL,
+      min_sol         REAL,
+      max_sol         REAL,
+      max_hops        INTEGER DEFAULT 5,
+      fresh_only      INTEGER DEFAULT 0,
+      active          INTEGER DEFAULT 1,
+      tradewiz_name   TEXT,
+      created_at      TEXT    DEFAULT (datetime('now')),
+      updated_at      TEXT    DEFAULT (datetime('now'))
     );
 
     CREATE TABLE IF NOT EXISTS tracked_txs (
@@ -77,10 +78,40 @@ async function initDB() {
       detected_at TEXT    DEFAULT (datetime('now'))
     );
 
+    CREATE TABLE IF NOT EXISTS exchanges (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id     TEXT    NOT NULL,
+      name        TEXT    NOT NULL,
+      wallet      TEXT    NOT NULL,
+      notes       TEXT,
+      created_at  TEXT    DEFAULT (datetime('now')),
+      UNIQUE(user_id, name)
+    );
+
+    CREATE TABLE IF NOT EXISTS user_strategies (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id     TEXT    NOT NULL,
+      wallet      TEXT    NOT NULL,
+      min_sol     REAL,
+      max_sol     REAL,
+      description TEXT,
+      created_at  TEXT    DEFAULT (datetime('now'))
+    );
+
     CREATE INDEX IF NOT EXISTS idx_strategies_user   ON strategies(user_id);
     CREATE INDEX IF NOT EXISTS idx_strategies_wallet ON strategies(wallet);
-    CREATE INDEX IF NOT EXISTS idx_txs_sig          ON tracked_txs(signature);
+    CREATE INDEX IF NOT EXISTS idx_txs_sig           ON tracked_txs(signature);
+    CREATE INDEX IF NOT EXISTS idx_exchanges_user    ON exchanges(user_id);
+    CREATE INDEX IF NOT EXISTS idx_ustrat_user       ON user_strategies(user_id);
   `);
+
+  // Migration: ajoute tradewiz_name sur les installs existantes
+  try {
+    db.run('ALTER TABLE strategies ADD COLUMN tradewiz_name TEXT');
+    logger.info('[DB] Migration: tradewiz_name ajouté à strategies');
+  } catch (_) {
+    // Colonne déjà présente — OK
+  }
 
   persistDB();
   logger.info('[DB] Tables initialisées');
@@ -120,11 +151,11 @@ function _run(sql, params = []) {
 
 // ─── CRUD Stratégies ──────────────────────────────────────────────────────────
 
-function addStrategy({ user_id, type, label, wallet, min_sol, max_sol, max_hops, fresh_only }) {
+function addStrategy({ user_id, type, label, wallet, min_sol, max_sol, max_hops, fresh_only, tradewiz_name }) {
   _run(
-    `INSERT INTO strategies (user_id, type, label, wallet, min_sol, max_sol, max_hops, fresh_only)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    [user_id, type, label || '', wallet, min_sol ?? 0, max_sol ?? 9999, max_hops ?? 5, fresh_only ?? 0]
+    `INSERT INTO strategies (user_id, type, label, wallet, min_sol, max_sol, max_hops, fresh_only, tradewiz_name)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [user_id, type, label || '', wallet, min_sol ?? 0, max_sol ?? 9999, max_hops ?? 5, fresh_only ?? 0, tradewiz_name || null]
   );
   const row = _get('SELECT last_insert_rowid() as id');
   return row ? row.id : null;
@@ -156,6 +187,49 @@ function deleteStrategy(id) {
   _run('DELETE FROM strategies WHERE id = ?', [id]);
 }
 
+// ─── CRUD Exchanges ───────────────────────────────────────────────────────────
+
+function addExchange({ user_id, name, wallet, notes }) {
+  _run(
+    `INSERT OR REPLACE INTO exchanges (user_id, name, wallet, notes)
+     VALUES (?, ?, ?, ?)`,
+    [String(user_id), name, wallet, notes || null]
+  );
+  const row = _get('SELECT last_insert_rowid() as id');
+  return row ? row.id : null;
+}
+
+function getExchanges(userId) {
+  return _all('SELECT * FROM exchanges WHERE user_id = ? ORDER BY name ASC', [String(userId)]);
+}
+
+function deleteExchange(userId, name) {
+  _run('DELETE FROM exchanges WHERE user_id = ? AND name = ?', [String(userId), name]);
+}
+
+// ─── CRUD User Strategies ─────────────────────────────────────────────────────
+
+function addUserStrategy({ user_id, wallet, min_sol, max_sol, description }) {
+  _run(
+    `INSERT INTO user_strategies (user_id, wallet, min_sol, max_sol, description)
+     VALUES (?, ?, ?, ?, ?)`,
+    [String(user_id), wallet, min_sol ?? 0, max_sol ?? 9999, description || null]
+  );
+  const row = _get('SELECT last_insert_rowid() as id');
+  return row ? row.id : null;
+}
+
+function getUserStrategies(userId) {
+  return _all(
+    'SELECT * FROM user_strategies WHERE user_id = ? ORDER BY id DESC',
+    [String(userId)]
+  );
+}
+
+function deleteUserStrategy(userId, id) {
+  _run('DELETE FROM user_strategies WHERE user_id = ? AND id = ?', [String(userId), id]);
+}
+
 // ─── Transactions trackées ────────────────────────────────────────────────────
 
 function logTrackedTx({ strategy_id, signature, from_wallet, to_wallet, amount_sol, hop, is_fresh }) {
@@ -176,6 +250,13 @@ function isTxAlreadyTracked(signature) {
   return !!row;
 }
 
+function getTrackedTxsByStrategy(strategyId) {
+  return _all(
+    'SELECT * FROM tracked_txs WHERE strategy_id = ? ORDER BY detected_at ASC',
+    [strategyId]
+  );
+}
+
 module.exports = {
   initDB,
   addStrategy,
@@ -186,4 +267,11 @@ module.exports = {
   deleteStrategy,
   logTrackedTx,
   isTxAlreadyTracked,
+  getTrackedTxsByStrategy,
+  addExchange,
+  getExchanges,
+  deleteExchange,
+  addUserStrategy,
+  getUserStrategies,
+  deleteUserStrategy,
 };

@@ -21,8 +21,9 @@ const { getParsedTransaction,
         isFreshWallet }       = require('../utils/solana');
 const { logTrackedTx,
         isTxAlreadyTracked }  = require('../db/database');
-const { formatStandardAlert } = require('../utils/formatter');
-const logger                  = require('../utils/logger');
+const { formatStandardAlert }       = require('../utils/formatter');
+const { sendTradeWizCopyTrade }     = require('../utils/tradewiz');
+const logger                        = require('../utils/logger');
 
 // Limite de concurrence pour les appels RPC (évite de flood le RPC)
 const limit = pLimit(5);
@@ -128,6 +129,17 @@ class StandardEngine {
             parse_mode: 'MarkdownV2',
             disable_web_page_preview: true,
           });
+
+          // TradeWiz copy trade (si tradewiz_name configuré)
+          if (strategy.tradewiz_name) {
+            await sendTradeWizCopyTrade(this.bot, {
+              walletAddress: transfer.to,
+              copyTradeName: strategy.tradewiz_name,
+              amountSol:     transfer.amountSol,
+              isFresh:       fresh,
+              userId:        strategy.user_id,
+            });
+          }
         }
       }
     } catch (err) {
