@@ -26,6 +26,7 @@ const {
 }                          = require('../db/database');
 const { formatStatus }     = require('../utils/formatter');
 const { runBacktest, formatBacktestResult } = require('../utils/backtest');
+const { analyzePattern, formatPatternResult } = require('../utils/pattern');
 const { generateCsv }      = require('../utils/csv');
 const logger               = require('../utils/logger');
 
@@ -306,15 +307,115 @@ function registerCommands(bot, restartEngines, stage) {
         ...Markup.inlineKeyboard([
           [
             Markup.button.callback('🔬 Nouveau Backtest', 'menu_add_backtest'),
+            Markup.button.callback('🧠 Analyser Pattern', `pattern_${signature}`),
             Markup.button.callback('🔙 Menu', 'menu_start'),
           ],
         ]),
       });
+
+      // Lance l'analyse pattern automatiquement si backtest réussi
+      if (result.success) {
+        await ctx.reply('🧠 Analyse du pattern dev en cours\\.\\.\\. ⏳', { parse_mode: 'MarkdownV2' });
+
+        try {
+          const pattern    = await analyzePattern(result);
+          const patternMsg = formatPatternResult(pattern);
+
+          await ctx.replyWithMarkdownV2(patternMsg, {
+            disable_web_page_preview: true,
+            ...Markup.inlineKeyboard([
+              [
+                Markup.button.callback('🔬 Nouveau Backtest', 'menu_add_backtest'),
+                Markup.button.callback('🔙 Menu', 'menu_start'),
+              ],
+            ]),
+          });
+        } catch (patternErr) {
+          logger.error(`[CMD] pattern erreur: ${patternErr.message}`);
+          ctx.reply(`⚠️ Pattern: ${patternErr.message}`);
+        }
+      }
     } catch (err) {
       logger.error(`[CMD] backtest erreur: ${err.message}`);
       ctx.reply(`❌ Erreur backtest: ${err.message}`,
         Markup.inlineKeyboard([[Markup.button.callback('🔙 Menu', 'menu_start')]]));
     }
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // /analyze_pattern <wallet> <signature> [max_hops]
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  bot.command('analyze_pattern', async (ctx) => {
+    const args = ctx.message.text.split(/\s+/).slice(1);
+
+    if (args.length < 2) {
+      return ctx.reply(
+        '🧠 *Analyze Pattern*\n\nFormat:\n`/analyze_pattern <wallet> <signature> [max_hops]`\n\nAnalyse le pattern complet du dev :\n• Financeur récurrent\n• Timing des hops\n• Fresh wallets\n• Heures actives UTC\n• Tokens lancés depuis dev wallet',
+        {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([[Markup.button.callback('🔙 Menu', 'menu_start')]]),
+        }
+      );
+    }
+
+    const [wallet, signature, hopsStr = '10'] = args;
+    const maxHops = parseInt(hopsStr, 10) || 10;
+
+    if (!isValidPublicKey(wallet)) {
+      return ctx.reply('❌ Adresse de wallet invalide.',
+        Markup.inlineKeyboard([[Markup.button.callback('🔙 Menu', 'menu_start')]]));
+    }
+
+    await ctx.reply('🔬 Backtest en cours pour extraire le chemin\\.\\.\\. ⏳', { parse_mode: 'MarkdownV2' });
+
+    try {
+      // D'abord le backtest pour avoir le path
+      const backtestResult = await runBacktest(wallet, signature, maxHops);
+
+      if (!backtestResult.success) {
+        return ctx.reply(
+          `❌ Backtest échoué: ${backtestResult.error || 'Erreur inconnue'}`,
+          Markup.inlineKeyboard([[Markup.button.callback('🔙 Menu', 'menu_start')]])
+        );
+      }
+
+      // Affiche le résultat backtest d'abord
+      const backtestMsg = formatBacktestResult(backtestResult);
+      await ctx.replyWithMarkdownV2(backtestMsg, { disable_web_page_preview: true });
+
+      // Puis lance l'analyse pattern
+      await ctx.reply('🧠 Analyse du pattern dev en cours\\.\\.\\. ⏳', { parse_mode: 'MarkdownV2' });
+
+      const pattern    = await analyzePattern(backtestResult);
+      const patternMsg = formatPatternResult(pattern);
+
+      await ctx.replyWithMarkdownV2(patternMsg, {
+        disable_web_page_preview: true,
+        ...Markup.inlineKeyboard([
+          [
+            Markup.button.callback('🔬 Nouveau Backtest', 'menu_add_backtest'),
+            Markup.button.callback('🔙 Menu', 'menu_start'),
+          ],
+        ]),
+      });
+    } catch (err) {
+      logger.error(`[CMD] analyze_pattern erreur: ${err.message}`);
+      ctx.reply(`❌ Erreur: ${err.message}`,
+        Markup.inlineKeyboard([[Markup.button.callback('🔙 Menu', 'menu_start')]]));
+    }
+  });
+
+  // Action inline : bouton "Analyser Pattern" depuis un résultat backtest
+  // Format: pattern_<signature>
+  bot.action(/^pattern_(.+)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const signature = ctx.match[1];
+    await ctx.reply('🧠 Analyse du pattern dev en cours\\.\\.\\. ⏳', { parse_mode: 'MarkdownV2' });
+    await ctx.reply(
+      `💡 Lance : /analyze_pattern <wallet> ${signature}`,
+      { parse_mode: 'Markdown' }
+    );
   });
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -707,8 +808,9 @@ function sendHelp(ctx) {
     `\`/add\\_standard <wallet> <min\\_sol> <max\\_sol> \\[label\\] \\[fresh\\_only\\] \\[tradewiz\\]\`\n\n` +
     `*Mode Chain Tracker:*\n` +
     `\`/add\\_chain <wallet> <max\\_hops> \\[min\\_sol\\] \\[max\\_sol\\] \\[label\\] \\[fresh\\_only\\] \\[tradewiz\\]\`\n\n` +
-    `*Backtest:*\n` +
-    `\`/backtest <wallet> <signature> \\[max\\_hops\\]\`\n\n` +
+    `*Backtest & Pattern:*\n` +
+    `\`/backtest <wallet> <signature> \\[max\\_hops\\]\`\n` +
+    `\`/analyze\\_pattern <wallet> <signature> \\[max\\_hops\\]\`\n\n` +
     `*Exchanges:*\n` +
     `\`/add\\_exchange <nom> <wallet> \\[notes\\]\`\n` +
     `\`/del\\_exchange <nom>\`\n\n` +
