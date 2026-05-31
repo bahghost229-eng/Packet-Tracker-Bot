@@ -1,0 +1,130 @@
+/**
+ * index.js — Point d'entrée principal
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Initialise:
+ *   1. Variables d'environnement (.env)
+ *   2. Base de données SQLite
+ *   3. Bot Telegram (Telegraf)
+ *   4. Subscriber WebSocket Solana
+ *   5. Moteurs Standard & Chain Tracker
+ *   6. Gestion gracieuse des signaux OS (SIGTERM, SIGINT)
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+
+'use strict';
+
+require('dotenv').config();
+
+const { Telegraf }         = require('telegraf');
+const logger               = require('./utils/logger');
+const { initDB,
+        getActiveStrategies } = require('./db/database');
+const rpcSubscriber        = require('./engines/rpcSubscriber');
+const StandardEngine       = require('./engines/standardEngine');
+const ChainEngine          = require('./engines/chainEngine');
+const { registerCommands } = require('./handlers/commands');
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Validation de l'environnement
+// ─────────────────────────────────────────────────────────────────────────────
+
+const REQUIRED_ENV = ['TELEGRAM_BOT_TOKEN', 'HELIUS_RPC_HTTP', 'HELIUS_RPC_WSS'];
+for (const key of REQUIRED_ENV) {
+  if (!process.env[key]) {
+    logger.error(`Variable d'environnement manquante: ${key}`);
+    process.exit(1);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Initialisation
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function main() {
+  logger.info('🚀 Démarrage Packet Tracker Bot...');
+
+  // 1. DB
+  initDB();
+  logger.info('[Boot] ✅ Base de données initialisée');
+
+  // 2. Bot Telegram
+  const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
+
+  // 3. Moteurs (instances uniques, partagées)
+  const standardEngine = new StandardEngine(bot);
+  const chainEngine    = new ChainEngine(bot);
+
+  /**
+   * Redémarre les moteurs de détection.
+   * Appelé après chaque ajout/suppression/pause de stratégie.
+   */
+  async function restartEngines() {
+    logger.info('[Boot] Redémarrage des moteurs...');
+    standardEngine.stop();
+    chainEngine.stop();
+
+    const strategies = getActiveStrategies();
+    logger.info(`[Boot] ${strategies.length} stratégie(s) active(s) chargées`);
+
+    standardEngine.start(strategies);
+    chainEngine.start(strategies);
+  }
+
+  // 4. RPC Subscriber WSS
+  await rpcSubscriber.start();
+  logger.info('[Boot] ✅ Subscriber WebSocket Solana prêt');
+
+  // 5. Commandes Telegram
+  registerCommands(bot, restartEngines);
+
+  // 6. Démarrage initial des moteurs
+  await restartEngines();
+
+  // 7. Lancement du bot (long polling)
+  await bot.launch();
+  logger.info('[Boot] ✅ Bot Telegram actif (long polling)');
+
+  // ── Notification de démarrage aux admins ───────────────────────────────
+
+  const adminIds = (process.env.ALLOWED_USER_IDS || '').split(',').filter(Boolean);
+  const strategies = getActiveStrategies();
+  for (const adminId of adminIds) {
+    try {
+      await bot.telegram.sendMessage(
+        adminId.trim(),
+        `✅ *Packet Tracker Bot démarré*\n` +
+        `📡 ${strategies.length} stratégie(s) active(s)\n` +
+        `🕐 ${new Date().toUTCString()}`,
+        { parse_mode: 'Markdown' }
+      );
+    } catch {}
+  }
+
+  // ── Gestion des signaux OS ─────────────────────────────────────────────
+
+  async function shutdown(signal) {
+    logger.info(`[Shutdown] Signal ${signal} reçu — arrêt propre...`);
+    standardEngine.stop();
+    chainEngine.stop();
+    await rpcSubscriber.stop();
+    bot.stop(signal);
+    logger.info('[Shutdown] Arrêt terminé.');
+    process.exit(0);
+  }
+
+  process.once('SIGINT',  () => shutdown('SIGINT'));
+  process.once('SIGTERM', () => shutdown('SIGTERM'));
+
+  // Capture des rejets non gérés pour éviter les crashes silencieux
+  process.on('unhandledRejection', (reason) => {
+    logger.error(`[UnhandledRejection] ${reason}`);
+  });
+  process.on('uncaughtException', (err) => {
+    logger.error(`[UncaughtException] ${err.message}\n${err.stack}`);
+  });
+}
+
+main().catch((err) => {
+  logger.error(`[main] Erreur fatale: ${err.message}\n${err.stack}`);
+  process.exit(1);
+});
