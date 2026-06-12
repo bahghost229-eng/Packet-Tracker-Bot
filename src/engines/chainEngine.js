@@ -30,6 +30,7 @@ const { getParsedTransaction,
         extractBoughtTokenMint,
         getConnection }        = require('../utils/solana');
 const { swapSolForToken }      = require('../utils/jupiter');
+const { sendToTradeWiz }       = require('../utils/tradewiz-mtproto');
 const { logTrackedTx,
         isTxAlreadyTracked }   = require('../db/database');
 const { formatChainAlert }         = require('../utils/formatter');
@@ -392,34 +393,18 @@ class ChainEngine {
         disable_web_page_preview: true,
       });
 
-      // ── Jupiter auto-buy ───────────────────────────────────────────────────
-      // Le dev wallet final vient de recevoir des fonds → il va lancer un token
-      // Si JUPITER_AUTO_BUY=true, on tente d'acheter le token qu'il a lancé
-      if (process.env.JUPITER_AUTO_BUY === 'true') {
-        // Récupère la tx pour chercher un éventuel token acheté par le dev wallet
+      // ── TradeWiz auto-buy via MTProto ─────────────────────────────────────
+      // Le dev wallet final identifié → on envoie le token mint à TradeWiz
+      if (process.env.TRADEWIZ_AUTO_BUY === 'true') {
         const tx = await getParsedTransaction(signature).catch(() => null);
         const tokenMint = tx ? extractBoughtTokenMint(tx, finalWallet) : null;
 
         if (tokenMint) {
-          const buyAmount = parseFloat(process.env.JUPITER_BUY_AMOUNT_SOL || '0.05');
-          logger.info(`[ChainEngine] 🛒 Auto-buy dev wallet: ${buyAmount} SOL → ${tokenMint}`);
-
-          const swapResult = await swapSolForToken(tokenMint, buyAmount);
-
-          const buyMsg = swapResult.success
-            ? `✅ *Auto\\-buy exécuté\\!*\n\n` +
-              `🔗 Dev Wallet: \`${finalWallet.slice(0, 8)}\\.\\.\\.\`\n` +
-              `🪙 Token: \`${tokenMint}\`\n` +
-              `💰 Dépensé: ${buyAmount} SOL\n` +
-              `📈 Reçu: ${swapResult.outAmount?.toLocaleString() || '?'} tokens\n` +
-              `🔗 Sig: [voir](https://solscan.io/tx/${swapResult.signature})`
-            : `❌ *Auto\\-buy échoué*\n\n` +
-              `🪙 Token: \`${tokenMint}\`\n` +
-              `⚠️ Erreur: ${swapResult.error}`;
-
-          await this.bot.telegram.sendMessage(strategy.user_id, buyMsg, {
-            parse_mode:               'MarkdownV2',
-            disable_web_page_preview: true,
+          logger.info(`[ChainEngine] 🛒 TradeWiz buy dev wallet: ${tokenMint}`);
+          await sendToTradeWiz(tokenMint, {
+            amountSol,
+            userId: strategy.user_id,
+            bot:    this.bot,
           });
         }
       }

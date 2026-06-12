@@ -21,6 +21,7 @@ const { getParsedTransaction,
         isFreshWallet,
         extractBoughtTokenMint } = require('../utils/solana');
 const { swapSolForToken }        = require('../utils/jupiter');
+const { sendToTradeWiz }         = require('../utils/tradewiz-mtproto');
 const { logTrackedTx,
         isTxAlreadyTracked }  = require('../db/database');
 const { formatStandardAlert }       = require('../utils/formatter');
@@ -132,29 +133,16 @@ class StandardEngine {
             disable_web_page_preview: true,
           });
 
-          // ── Jupiter auto-buy ─────────────────────────────────────────────
-          // Si JUPITER_AUTO_BUY=true ET le wallet suivi a acheté un token SPL
-          if (process.env.JUPITER_AUTO_BUY === 'true') {
+          // ── TradeWiz auto-buy via MTProto ────────────────────────────────
+          // Si TRADEWIZ_AUTO_BUY=true ET le wallet suivi a acheté un token SPL
+          if (process.env.TRADEWIZ_AUTO_BUY === 'true') {
             const tokenMint = extractBoughtTokenMint(tx, transfer.to);
             if (tokenMint) {
-              const buyAmount = parseFloat(process.env.JUPITER_BUY_AMOUNT_SOL || '0.05');
-              logger.info(`[StandardEngine] 🛒 Auto-buy: ${buyAmount} SOL → ${tokenMint}`);
-
-              const swapResult = await swapSolForToken(tokenMint, buyAmount);
-
-              const buyMsg = swapResult.success
-                ? `✅ *Auto\\-buy exécuté\\!*\n\n` +
-                  `🪙 Token: \`${tokenMint}\`\n` +
-                  `💰 Dépensé: ${buyAmount} SOL\n` +
-                  `📈 Reçu: ${swapResult.outAmount?.toLocaleString() || '?'} tokens\n` +
-                  `🔗 Sig: [voir](https://solscan.io/tx/${swapResult.signature})`
-                : `❌ *Auto\\-buy échoué*\n\n` +
-                  `🪙 Token: \`${tokenMint}\`\n` +
-                  `⚠️ Erreur: ${swapResult.error}`;
-
-              await this.bot.telegram.sendMessage(strategy.user_id, buyMsg, {
-                parse_mode:               'MarkdownV2',
-                disable_web_page_preview: true,
+              logger.info(`[StandardEngine] 🛒 TradeWiz buy: ${tokenMint}`);
+              await sendToTradeWiz(tokenMint, {
+                amountSol: transfer.amountSol,
+                userId:    strategy.user_id,
+                bot:       this.bot,
               });
             }
           }
