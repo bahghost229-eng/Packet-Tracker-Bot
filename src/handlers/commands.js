@@ -48,22 +48,18 @@ function authGuard(ctx, next) {
 }
 
 /** Échappe les caractères spéciaux MarkdownV2 */
-const esc = (t) => String(t).replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, '\\/** Échappe les caractères spéciaux MarkdownV2 */
-const esc = (t) => String(t).replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, '\\$&');');
 
-/**
- * Stockage temporaire des signatures pour les callbacks "Analyser Pattern".
- * Telegram limite callback_data à 64 bytes — les signatures Solana (~88 chars)
- * dépassent cette limite, donc on stocke un ID court ici.
- * TTL: 30 minutes, nettoyage auto.
- */
-const _patternStore = new Map(); // shortId -> { wallet, signature, maxHops, ts }
+/** Escapes MarkdownV2 special characters */
+const esc = (t) => String(t).replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, '\\$&');
+
+// Stockage temporaire des signatures pour boutons "Analyser Pattern"
+// Telegram limite callback_data a 64 bytes, signatures Solana ~88 chars
+const _patternStore = new Map();
 let _patternCounter = 0;
 function storePatternRef(wallet, signature, maxHops) {
   _patternCounter = (_patternCounter + 1) % 9999;
   const id = String(_patternCounter).padStart(4, '0');
   _patternStore.set(id, { wallet, signature, maxHops, ts: Date.now() });
-  // Nettoyage des entrées > 30 min
   const cutoff = Date.now() - 30 * 60 * 1000;
   for (const [k, v] of _patternStore) {
     if (v.ts < cutoff) _patternStore.delete(k);
@@ -74,12 +70,6 @@ function getPatternRef(id) {
   return _patternStore.get(id) || null;
 }
 
-/**
- * Enregistre toutes les commandes sur l'instance Telegraf.
- * @param {import('telegraf').Telegraf} bot
- * @param {Function} restartEngines
- * @param {import('telegraf').Scenes.Stage} stage
- */
 function registerCommands(bot, restartEngines, stage) {
 
   bot.use(authGuard);
