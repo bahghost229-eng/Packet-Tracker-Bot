@@ -48,7 +48,31 @@ function authGuard(ctx, next) {
 }
 
 /** Échappe les caractères spéciaux MarkdownV2 */
-const esc = (t) => String(t).replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, '\\$&');
+const esc = (t) => String(t).replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, '\\/** Échappe les caractères spéciaux MarkdownV2 */
+const esc = (t) => String(t).replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, '\\$&');');
+
+/**
+ * Stockage temporaire des signatures pour les callbacks "Analyser Pattern".
+ * Telegram limite callback_data à 64 bytes — les signatures Solana (~88 chars)
+ * dépassent cette limite, donc on stocke un ID court ici.
+ * TTL: 30 minutes, nettoyage auto.
+ */
+const _patternStore = new Map(); // shortId -> { wallet, signature, maxHops, ts }
+let _patternCounter = 0;
+function storePatternRef(wallet, signature, maxHops) {
+  _patternCounter = (_patternCounter + 1) % 9999;
+  const id = String(_patternCounter).padStart(4, '0');
+  _patternStore.set(id, { wallet, signature, maxHops, ts: Date.now() });
+  // Nettoyage des entrées > 30 min
+  const cutoff = Date.now() - 30 * 60 * 1000;
+  for (const [k, v] of _patternStore) {
+    if (v.ts < cutoff) _patternStore.delete(k);
+  }
+  return id;
+}
+function getPatternRef(id) {
+  return _patternStore.get(id) || null;
+}
 
 /**
  * Enregistre toutes les commandes sur l'instance Telegraf.
@@ -302,12 +326,13 @@ function registerCommands(bot, restartEngines, stage) {
       const result = await runBacktest(wallet, signature, maxHops);
       const msg    = formatBacktestResult(result);
 
+      const patternId = storePatternRef(wallet, signature, maxHops);
       await ctx.replyWithMarkdownV2(msg, {
         disable_web_page_preview: true,
         ...Markup.inlineKeyboard([
           [
             Markup.button.callback('🔬 Nouveau Backtest', 'menu_add_backtest'),
-            Markup.button.callback('🧠 Analyser Pattern', `pattern_${signature}`),
+            Markup.button.callback('🧠 Analyser Pattern', `pat_${patternId}`),
             Markup.button.callback('🔙 Menu', 'menu_start'),
           ],
         ]),
@@ -407,15 +432,34 @@ function registerCommands(bot, restartEngines, stage) {
   });
 
   // Action inline : bouton "Analyser Pattern" depuis un résultat backtest
-  // Format: pattern_<signature>
-  bot.action(/^pattern_(.+)$/, async (ctx) => {
+  // Format: pat_<shortId> (court pour rester dans la limite 64 bytes de Telegram)
+  bot.action(/^pat_(\d{4})$/, async (ctx) => {
     await ctx.answerCbQuery();
-    const signature = ctx.match[1];
+    const ref = getPatternRef(ctx.match[1]);
+    if (!ref) {
+      return ctx.reply('⚠️ Session expirée. Relance un /backtest.');
+    }
     await ctx.reply('🧠 Analyse du pattern dev en cours\\.\\.\\. ⏳', { parse_mode: 'MarkdownV2' });
-    await ctx.reply(
-      `💡 Lance : /analyze_pattern <wallet> ${signature}`,
-      { parse_mode: 'Markdown' }
-    );
+    try {
+      const backtestResult = await runBacktest(ref.wallet, ref.signature, ref.maxHops);
+      if (!backtestResult.success) {
+        return ctx.reply(`❌ Backtest échoué: ${backtestResult.error || 'Erreur inconnue'}`);
+      }
+      const pattern    = await analyzePattern(backtestResult);
+      const patternMsg = formatPatternResult(pattern);
+      await ctx.replyWithMarkdownV2(patternMsg, {
+        disable_web_page_preview: true,
+        ...Markup.inlineKeyboard([
+          [
+            Markup.button.callback('🔬 Nouveau Backtest', 'menu_add_backtest'),
+            Markup.button.callback('🔙 Menu', 'menu_start'),
+          ],
+        ]),
+      });
+    } catch (err) {
+      logger.error(`[CMD] pat_ action erreur: ${err.message}`);
+      ctx.reply(`❌ Erreur: ${err.message}`);
+    }
   });
 
   // ═══════════════════════════════════════════════════════════════════════════
