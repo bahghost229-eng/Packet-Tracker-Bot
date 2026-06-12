@@ -1,15 +1,13 @@
 /**
  * heliusWebhook.js
  * ─────────────────────────────────────────────────────────────────────────────
- * Gestion du webhook Helius via leur API REST.
+ * Gestion du webhook Helius via API REST.
+ * Crée ou retrouve le webhook, met à jour la liste des wallets.
  *
- * - Au démarrage: crée ou retrouve le webhook existant
- * - Sur subscribe/unsubscribe: met à jour la liste des wallets via PATCH
- *
- * Variables d'environnement requises:
+ * Variables d'environnement:
  *   HELIUS_API_KEY        — clé Helius
- *   HELIUS_WEBHOOK_URL    — URL publique de ton bot (ex: http://199.19.73.16:3000/webhook)
- *   HELIUS_WEBHOOK_ID     — (optionnel) ID d'un webhook existant à réutiliser
+ *   HELIUS_WEBHOOK_URL    — URL publique (ex: http://199.19.73.16:3000/webhook)
+ *   HELIUS_WEBHOOK_ID     — (optionnel) ID webhook existant à réutiliser
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -18,19 +16,18 @@
 const axios  = require('axios');
 const logger = require('./logger');
 
-const HELIUS_API_KEY   = process.env.HELIUS_API_KEY || '';
-const WEBHOOK_URL      = process.env.HELIUS_WEBHOOK_URL || `http://199.19.73.16:3000/webhook`;
-const HELIUS_BASE      = 'https://api.helius.xyz/v0';
+const HELIUS_API_KEY = process.env.HELIUS_API_KEY || '';
+const WEBHOOK_URL    = process.env.HELIUS_WEBHOOK_URL || 'http://199.19.73.16:3000/webhook';
+const HELIUS_BASE    = 'https://api.helius.xyz/v0';
+
+// Wallet placeholder requis par Helius quand la liste est vide
+const PLACEHOLDER = 'So11111111111111111111111111111111111111112'; // SOL mint
 
 class HeliusWebhookManager {
   constructor() {
     this._webhookId = process.env.HELIUS_WEBHOOK_ID || null;
   }
 
-  /**
-   * Initialise: crée le webhook si pas d'ID existant, sinon le retrouve.
-   * Appelé une fois au démarrage.
-   */
   async init() {
     if (!HELIUS_API_KEY) {
       logger.error('[HeliusWebhook] HELIUS_API_KEY manquante');
@@ -38,14 +35,15 @@ class HeliusWebhookManager {
     }
 
     try {
+      // Si on a déjà un ID, vérifie qu'il existe
       if (this._webhookId) {
-        // Vérifie que le webhook existe encore
         const wh = await this._getWebhook(this._webhookId);
         if (wh) {
-          logger.info(`[HeliusWebhook] ✅ Webhook existant trouvé: ${this._webhookId}`);
+          logger.info(`[HeliusWebhook] ✅ Webhook existant: ${this._webhookId}`);
           return;
         }
-        logger.warn(`[HeliusWebhook] Webhook ${this._webhookId} introuvable — création d'un nouveau`);
+        logger.warn(`[HeliusWebhook] Webhook ${this._webhookId} introuvable — recréation`);
+        this._webhookId = null;
       }
 
       // Cherche un webhook existant avec la même URL
@@ -53,25 +51,21 @@ class HeliusWebhookManager {
       if (existing) {
         this._webhookId = existing.webhookID;
         logger.info(`[HeliusWebhook] ✅ Webhook retrouvé par URL: ${this._webhookId}`);
+        logger.info(`[HeliusWebhook] → Ajoute dans .env: HELIUS_WEBHOOK_ID=${this._webhookId}`);
         return;
       }
 
-      // Crée un nouveau webhook (sans wallets pour l'instant)
-      await this._createWebhook([]);
+      // Crée un nouveau webhook avec le placeholder
+      await this._createWebhook([PLACEHOLDER]);
 
     } catch (err) {
-      logger.error(`[HeliusWebhook] Erreur init: ${err.message}`);
+      logger.error(`[HeliusWebhook] Erreur init: ${err.response?.data ? JSON.stringify(err.response.data) : err.message}`);
     }
   }
 
-  /**
-   * Met à jour la liste des wallets surveillés dans le webhook Helius.
-   * @param {string[]} wallets - Liste complète des wallets à surveiller
-   */
   async updateWallets(wallets) {
     if (!HELIUS_API_KEY) return;
 
-    // Init si pas encore fait
     if (!this._webhookId) {
       await this.init();
     }
@@ -81,28 +75,37 @@ class HeliusWebhookManager {
       return;
     }
 
+    // Helius refuse les listes vides — on garde le placeholder si 0 wallets
+    const addresses = wallets.length > 0 ? wallets : [PLACEHOLDER];
+
     try {
       await axios.put(
         `${HELIUS_BASE}/webhooks/${this._webhookId}?api-key=${HELIUS_API_KEY}`,
         {
-          webhookURL:        WEBHOOK_URL,
-          transactionTypes:  ['Any'],
-          accountAddresses:  wallets,
-          webhookType:       'enhanced',
-          txnStatus:         'success',
+          webhookURL:       WEBHOOK_URL,
+          transactionTypes: ['Any'],
+          accountAddresses: addresses,
+          webhookType:      'enhanced',
+          txnStatus:        'success',
         },
         { timeout: 10_000 }
       );
 
-      logger.info(`[HeliusWebhook] ✅ Webhook mis à jour — ${wallets.length} wallet(s)`);
+      logger.info(`[HeliusWebhook] ✅ Webhook mis à jour — ${addresses.length} wallet(s) (dont éventuels placeholders)`);
     } catch (err) {
-      const msg = err.response?.data?.error || err.message;
-      logger.error(`[HeliusWebhook] Erreur update wallets: ${msg}`);
-      throw err;
+      const detail = err.response?.data ? JSON.stringify(err.response.data) : err.message;
+      logger.error(`[HeliusWebhook] Erreur update: ${detail}`);
+
+      // Si le webhook n'existe plus côté Helius, on le recrée
+      if (err.response?.status === 404) {
+        logger.warn('[HeliusWebhook] Webhook disparu — recréation...');
+        this._webhookId = null;
+        await this.init();
+        await this.updateWallets(wallets); // réessaie
+      }
     }
   }
 
-  /** Récupère un webhook par ID */
   async _getWebhook(id) {
     try {
       const res = await axios.get(
@@ -115,45 +118,41 @@ class HeliusWebhookManager {
     }
   }
 
-  /** Cherche un webhook existant avec la même webhookURL */
   async _findWebhookByUrl(url) {
     try {
       const res = await axios.get(
         `${HELIUS_BASE}/webhooks?api-key=${HELIUS_API_KEY}`,
         { timeout: 10_000 }
       );
-      const webhooks = Array.isArray(res.data) ? res.data : [];
-      return webhooks.find(w => w.webhookURL === url) || null;
+      const list = Array.isArray(res.data) ? res.data : [];
+      return list.find(w => w.webhookURL === url) || null;
     } catch (err) {
-      logger.warn(`[HeliusWebhook] Impossible de lister les webhooks: ${err.message}`);
+      logger.warn(`[HeliusWebhook] Liste webhooks: ${err.message}`);
       return null;
     }
   }
 
-  /** Crée un nouveau webhook Helius */
-  async _createWebhook(wallets = []) {
-    try {
-      const res = await axios.post(
-        `${HELIUS_BASE}/webhooks?api-key=${HELIUS_API_KEY}`,
-        {
-          webhookURL:       WEBHOOK_URL,
-          transactionTypes: ['Any'],
-          accountAddresses: wallets,
-          webhookType:      'enhanced',
-          txnStatus:        'success',
-        },
-        { timeout: 10_000 }
-      );
+  async _createWebhook(wallets = [PLACEHOLDER]) {
+    const payload = {
+      webhookURL:       WEBHOOK_URL,
+      transactionTypes: ['Any'],
+      accountAddresses: wallets,
+      webhookType:      'enhanced',
+      txnStatus:        'success',
+    };
 
-      this._webhookId = res.data.webhookID;
-      logger.info(`[HeliusWebhook] ✅ Webhook créé: ${this._webhookId}`);
-      logger.info(`[HeliusWebhook] → Ajoute dans ton .env: HELIUS_WEBHOOK_ID=${this._webhookId}`);
-      return res.data;
-    } catch (err) {
-      const msg = err.response?.data?.error || err.message;
-      logger.error(`[HeliusWebhook] Erreur création webhook: ${msg}`);
-      throw err;
-    }
+    logger.info(`[HeliusWebhook] Création webhook: ${JSON.stringify(payload)}`);
+
+    const res = await axios.post(
+      `${HELIUS_BASE}/webhooks?api-key=${HELIUS_API_KEY}`,
+      payload,
+      { timeout: 10_000 }
+    );
+
+    this._webhookId = res.data.webhookID;
+    logger.info(`[HeliusWebhook] ✅ Webhook créé: ${this._webhookId}`);
+    logger.info(`[HeliusWebhook] → Ajoute dans .env: HELIUS_WEBHOOK_ID=${this._webhookId}`);
+    return res.data;
   }
 
   getWebhookId() {
@@ -161,6 +160,5 @@ class HeliusWebhookManager {
   }
 }
 
-// Singleton
 const heliusWebhook = new HeliusWebhookManager();
 module.exports = heliusWebhook;
