@@ -13,6 +13,7 @@ const { isValidPublicKey } = require('../utils/solana');
 const { addStrategy }      = require('../db/database');
 const logger               = require('../utils/logger');
 
+// Escape tous les caractères réservés MarkdownV2
 const esc = (t) => String(t).replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, '\\$&');
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -45,10 +46,16 @@ const addStandardWizard = new Scenes.WizardScene(
       return ctx.scene.leave();
     }
 
-    const wallet = ctx.message?.text?.trim();
-    if (!wallet || !isValidPublicKey(wallet)) {
+    // Guard: input doit être du texte
+    if (!ctx.message?.text) {
+      await ctx.reply('Envoie l\'adresse wallet en texte :', Markup.inlineKeyboard([[Markup.button.callback('❌ Annuler', 'wizard_cancel')]]));
+      return;
+    }
+
+    const wallet = ctx.message.text.trim();
+    if (!isValidPublicKey(wallet)) {
       await ctx.reply('❌ Adresse invalide. Réessaie :', Markup.inlineKeyboard([[Markup.button.callback('❌ Annuler', 'wizard_cancel')]]));
-      return; // Reste à l'étape courante
+      return;
     }
 
     ctx.wizard.state.data.wallet = wallet;
@@ -73,7 +80,12 @@ const addStandardWizard = new Scenes.WizardScene(
       return ctx.scene.leave();
     }
 
-    const val = parseFloat(ctx.message?.text?.trim());
+    if (!ctx.message?.text) {
+      await ctx.reply('Envoie un nombre (ex: `1.057`) :', { parse_mode: 'Markdown' });
+      return;
+    }
+
+    const val = parseFloat(ctx.message.text.trim());
     if (isNaN(val) || val <= 0) {
       await ctx.reply('❌ Valeur invalide. Envoie un nombre (ex: `1.057`) :', { parse_mode: 'Markdown' });
       return;
@@ -101,7 +113,12 @@ const addStandardWizard = new Scenes.WizardScene(
       return ctx.scene.leave();
     }
 
-    const val = parseFloat(ctx.message?.text?.trim());
+    if (!ctx.message?.text) {
+      await ctx.reply('Envoie un nombre (ex: `1.058`) :', { parse_mode: 'Markdown' });
+      return;
+    }
+
+    const val = parseFloat(ctx.message.text.trim());
     const min = ctx.wizard.state.data.min_sol;
 
     if (isNaN(val) || val <= min) {
@@ -126,7 +143,7 @@ const addStandardWizard = new Scenes.WizardScene(
     return ctx.wizard.next();
   },
 
-  // ── Étape 5 : Fresh Only + TradeWiz → Confirmation ───────────────────────
+  // ── Étape 5 : Fresh Only → Confirmation ──────────────────────────────────
   async (ctx) => {
     if (ctx.callbackQuery?.data === 'wizard_cancel') {
       await ctx.answerCbQuery();
@@ -137,14 +154,17 @@ const addStandardWizard = new Scenes.WizardScene(
     if (ctx.callbackQuery?.data === 'wizard_skip_label') {
       await ctx.answerCbQuery();
       ctx.wizard.state.data.label = '';
+    } else if (ctx.message?.text) {
+      ctx.wizard.state.data.label = ctx.message.text.trim();
     } else {
-      ctx.wizard.state.data.label = ctx.message?.text?.trim() || '';
+      await ctx.reply('Envoie un label ou clique Passer ⬆️');
+      return;
     }
 
     const d = ctx.wizard.state.data;
 
     await ctx.reply(
-      `✅ Label: \`${d.label || 'Auto'}\`\n\n` +
+      `✅ Label: \`${esc(d.label || 'Auto')}\`\n\n` +
       '*Étape 5/5 — Options*\n\n' +
       'Activer *Fresh Only* ? \\(ignore les anciens wallets\\)',
       {
@@ -176,7 +196,6 @@ const addStandardWizard = new Scenes.WizardScene(
       await ctx.answerCbQuery();
       ctx.wizard.state.data.fresh_only = 0;
     } else {
-      // Input texte inattendu à cette étape
       await ctx.reply('Clique sur un bouton ⬆️');
       return;
     }
@@ -235,13 +254,12 @@ const addStandardWizard = new Scenes.WizardScene(
 
     logger.info(`[Wizard] add_standard: stratégie ${id} créée par ${ctx.from.id}`);
 
-    // Notifie le restartEngines via event custom
     ctx.scene.state.onCreate && ctx.scene.state.onCreate();
 
     await ctx.reply(
       `✅ *Stratégie Standard créée* \\[ID: ${id}\\]\n\n` +
       `👛 \`${esc(d.wallet)}\`\n` +
-      `📊 Range: ${esc(d.min_sol)} — ${esc(d.max_sol)} SOL\n` +
+      `📊 Range: ${esc(String(d.min_sol))} — ${esc(String(d.max_sol))} SOL\n` +
       `🔍 Fresh Only: ${d.fresh_only ? '✅' : '❌'}`,
       {
         parse_mode: 'MarkdownV2',
@@ -289,18 +307,25 @@ const addChainWizard = new Scenes.WizardScene(
       return ctx.scene.leave();
     }
 
-    const wallet = ctx.message?.text?.trim();
-    if (!wallet || !isValidPublicKey(wallet)) {
+    // Guard: input doit être du texte
+    if (!ctx.message?.text) {
+      await ctx.reply('Envoie l\'adresse Mother Wallet en texte :', Markup.inlineKeyboard([[Markup.button.callback('❌ Annuler', 'wizard_cancel')]]));
+      return;
+    }
+
+    const wallet = ctx.message.text.trim();
+    if (!isValidPublicKey(wallet)) {
       await ctx.reply('❌ Adresse invalide. Réessaie :', Markup.inlineKeyboard([[Markup.button.callback('❌ Annuler', 'wizard_cancel')]]));
       return;
     }
 
     ctx.wizard.state.data.wallet = wallet;
+    const short = `${wallet.slice(0, 8)}...${wallet.slice(-4)}`;
 
     await ctx.reply(
-      `✅ Mother Wallet: \`${wallet.slice(0, 8)}...${wallet.slice(-4)}\`\n\n` +
-      '*Étape 2/5 — Nombre de sauts (Max Hops)*\n\n' +
-      'Combien de sauts veux-tu suivre ? \\(1 à 10\\)',
+      `✅ Mother Wallet: \`${esc(short)}\`\n\n` +
+      '*Étape 2/5 — Nombre de sauts \\(Max Hops\\)*\n\n' +
+      'Combien de sauts veux\\-tu suivre ? \\(1 à 10\\)',
       {
         parse_mode: 'MarkdownV2',
         ...Markup.inlineKeyboard([
@@ -347,7 +372,7 @@ const addChainWizard = new Scenes.WizardScene(
     await ctx.reply(
       `✅ Max Hops: \`${hops}\`\n\n` +
       '*Étape 3/5 — Filtre SOL \\(optionnel\\)*\n\n' +
-      'Veux-tu filtrer par montant de transfert ?',
+      'Veux\\-tu filtrer par montant de transfert ?',
       {
         parse_mode: 'MarkdownV2',
         ...Markup.inlineKeyboard([
@@ -373,7 +398,6 @@ const addChainWizard = new Scenes.WizardScene(
       ctx.wizard.state.data.min_sol = 0;
       ctx.wizard.state.data.max_sol = 9999;
       ctx.wizard.state.data.skipSol = true;
-      // Saute à l'étape label
       await _askChainLabel(ctx);
       return ctx.wizard.next();
     }
