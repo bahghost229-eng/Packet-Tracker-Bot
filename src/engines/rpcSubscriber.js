@@ -1,15 +1,14 @@
 /**
  * rpcSubscriber.js
  * ─────────────────────────────────────────────────────────────────────────────
- * Surveillance des wallets via Helius WebSocket natif (transactionSubscribe).
+ * Surveillance des wallets via Helius WebSocket — logsSubscribe (gratuit).
  *
- * Pourquoi pas onLogs de @solana/web3.js ?
- *   → onLogs ne déclenche jamais le callback sur Helius enhanced WS pour
- *     les wallets standards. Helius recommande leur propre méthode
- *     "transactionSubscribe" via WebSocket JSON-RPC natif.
+ * logsSubscribe avec filtre "mentions" = méthode Solana native, plan free OK.
+ * Une souscription par wallet (Solana ne supporte pas multi-wallet en un seul
+ * logsSubscribe avec mentions).
  *
- * URL: wss://atlas-mainnet.helius-rpc.com/?api-key=KEY
- * Méthode: transactionSubscribe avec accountInclude[]
+ * URL: wss://mainnet.helius-rpc.com/?api-key=KEY
+ * Méthode: logsSubscribe { mentions: [walletAddress] }
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -19,12 +18,12 @@ const { EventEmitter } = require('events');
 const WebSocket        = require('ws');
 const logger           = require('../utils/logger');
 
-const HELIUS_API_KEY       = process.env.HELIUS_API_KEY || '';
-const HELIUS_WS_URL        = `wss://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
+const HELIUS_API_KEY      = process.env.HELIUS_API_KEY || '';
+const HELIUS_WS_URL       = `wss://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
 
-const RECONNECT_DELAY_MS   = parseInt(process.env.WS_RECONNECT_DELAY_MS || '5000', 10);
-const MAX_RECONNECT_DELAY  = 120_000;
-const PING_INTERVAL_MS     = 30_000;
+const RECONNECT_DELAY_MS  = parseInt(process.env.WS_RECONNECT_DELAY_MS || '5000', 10);
+const MAX_RECONNECT_DELAY = 120_000;
+const PING_INTERVAL_MS    = 30_000;
 const MAX_RECONNECT_ATTEMPTS = 10;
 
 class RpcSubscriber extends EventEmitter {
@@ -32,28 +31,29 @@ class RpcSubscriber extends EventEmitter {
     super();
     this.setMaxListeners(200);
 
-    /** @type {Set<string>} wallets actuellement surveillés */
+    /** @type {Set<string>} */
     this._wallets = new Set();
 
     /** WebSocket actif */
     this._ws = null;
 
-    /** subscriptionId retourné par Helius */
-    this._subId = null;
+    /** Map<walletAddress, subId> */
+    this._subIds = new Map();
 
-    this._isShuttingDown    = false;
-    this._pingTimer         = null;
-    this._reconnectTimer    = null;
-    this._reconnectAttempts = 0;
-    this._isReconnecting    = false;
+    /** Map<reqId, walletAddress> — pour associer la réponse à la souscription */
+    this._pendingSubs = new Map();
 
-    /** request id counter pour JSON-RPC */
-    this._reqId = 1;
+    this._isShuttingDown     = false;
+    this._pingTimer          = null;
+    this._reconnectTimer     = null;
+    this._reconnectAttempts  = 0;
+    this._isReconnecting     = false;
+    this._reqId              = 1;
   }
 
-  // ──────────────────────────────────────────────────────────────────────────
+  // ────────────────────────────────────────────────────────────────────────
   // PUBLIC
-  // ──────────────────────────────────────────────────────────────────────────
+  // ────────────────────────────────────────────────────────────────────────
 
   async start() {
     this._isShuttingDown    = false;
@@ -64,33 +64,34 @@ class RpcSubscriber extends EventEmitter {
       return;
     }
 
-    logger.info('[RpcSubscriber] Démarrage WebSocket Helius transactionSubscribe');
+    logger.info('[RpcSubscriber] Démarrage WebSocket Helius (logsSubscribe)');
     this._connect();
   }
 
-  /** Ajoute un wallet à surveiller (reconnecte si WS déjà ouvert) */
   subscribe(walletAddress) {
-    if (this._wallets.has(walletAddress)) {
-      logger.debug(`[RpcSubscriber] Déjà souscrit: ${walletAddress}`);
-      return;
-    }
+    if (this._wallets.has(walletAddress)) return;
     this._wallets.add(walletAddress);
     logger.info(`[RpcSubscriber] Wallet ajouté: ${walletAddress} (total: ${this._wallets.size})`);
 
-    // Reconnecte le WS pour que Helius inclue le nouveau wallet
     if (this._ws && this._ws.readyState === WebSocket.OPEN) {
-      this._resubscribeAll();
+      this._subscribeWallet(walletAddress);
     }
   }
 
-  /** Retire un wallet de la surveillance */
   async unsubscribe(walletAddress) {
     if (!this._wallets.has(walletAddress)) return;
     this._wallets.delete(walletAddress);
-    logger.info(`[RpcSubscriber] Wallet retiré: ${walletAddress} (total: ${this._wallets.size})`);
+    logger.info(`[RpcSubscriber] Désabonné: ${walletAddress} (total: ${this._wallets.size})`);
 
-    if (this._ws && this._ws.readyState === WebSocket.OPEN) {
-      this._resubscribeAll();
+    const subId = this._subIds.get(walletAddress);
+    if (subId !== undefined && this._ws && this._ws.readyState === WebSocket.OPEN) {
+      this._ws.send(JSON.stringify({
+        jsonrpc: '2.0',
+        id:      this._reqId++,
+        method:  'logsUnsubscribe',
+        params:  [subId],
+      }));
+      this._subIds.delete(walletAddress);
     }
   }
 
@@ -106,23 +107,28 @@ class RpcSubscriber extends EventEmitter {
     return [...this._wallets];
   }
 
-  // ──────────────────────────────────────────────────────────────────────────
+  // ────────────────────────────────────────────────────────────────────────
   // PRIVATE — WebSocket
-  // ──────────────────────────────────────────────────────────────────────────
+  // ────────────────────────────────────────────────────────────────────────
 
   _connect() {
     if (this._isShuttingDown) return;
 
     logger.info(`[RpcSubscriber] Connexion à Helius WS... (${this._wallets.size} wallet(s))`);
-
     this._ws = new WebSocket(HELIUS_WS_URL);
 
     this._ws.on('open', () => {
       logger.info('[RpcSubscriber] ✅ WebSocket Helius connecté');
       this._reconnectAttempts = 0;
       this._isReconnecting    = false;
+      this._subIds.clear();
+      this._pendingSubs.clear();
       this._startPing();
-      this._resubscribeAll();
+
+      // Souscription individuelle pour chaque wallet
+      for (const wallet of this._wallets) {
+        this._subscribeWallet(wallet);
+      }
     });
 
     this._ws.on('message', (data) => {
@@ -143,11 +149,8 @@ class RpcSubscriber extends EventEmitter {
       if (this._pingTimer) clearInterval(this._pingTimer);
 
       if (code === 4401 || (reason && reason.toString().includes('401'))) {
-        logger.error(
-          '[RpcSubscriber] 🔴 ERREUR 401 — Clé Helius invalide ou expirée.\n' +
-          '  → Vérifie HELIUS_API_KEY dans ton .env'
-        );
-        return; // pas de reconnexion
+        logger.error('[RpcSubscriber] 🔴 ERREUR 401 — Clé Helius invalide. Vérifie HELIUS_API_KEY.');
+        return;
       }
 
       this._scheduleReconnect();
@@ -160,91 +163,71 @@ class RpcSubscriber extends EventEmitter {
       this._ws.removeAllListeners();
       this._ws.terminate();
     } catch {}
-    this._ws   = null;
-    this._subId = null;
+    this._ws = null;
+    this._subIds.clear();
+    this._pendingSubs.clear();
   }
 
-  /** Envoie transactionSubscribe avec tous les wallets courants */
-  _resubscribeAll() {
+  /** Envoie un logsSubscribe pour un wallet spécifique */
+  _subscribeWallet(walletAddress) {
     if (!this._ws || this._ws.readyState !== WebSocket.OPEN) return;
 
-    const wallets = [...this._wallets];
-    if (wallets.length === 0) {
-      logger.info('[RpcSubscriber] Aucun wallet à surveiller');
-      return;
-    }
+    const id = this._reqId++;
+    this._pendingSubs.set(id, walletAddress);
 
-    // D'abord unsubscribe l'ancienne sub si elle existe
-    if (this._subId !== null) {
-      const unsubMsg = {
-        jsonrpc: '2.0',
-        id:      this._reqId++,
-        method:  'transactionUnsubscribe',
-        params:  [this._subId],
-      };
-      this._ws.send(JSON.stringify(unsubMsg));
-      this._subId = null;
-    }
-
-    const subMsg = {
+    const msg = {
       jsonrpc: '2.0',
-      id:      this._reqId++,
-      method:  'transactionSubscribe',
+      id,
+      method:  'logsSubscribe',
       params: [
-        {
-          accountInclude: wallets,
-        },
-        {
-          commitment:                     'confirmed',
-          encoding:                       'jsonParsed',
-          transactionDetails:             'full',
-          showRewards:                    false,
-          maxSupportedTransactionVersion: 0,
-        },
+        { mentions: [walletAddress] },
+        { commitment: 'confirmed' },
       ],
     };
 
-    this._ws.send(JSON.stringify(subMsg));
-    logger.info(`[RpcSubscriber] transactionSubscribe envoyé — ${wallets.length} wallet(s): ${wallets.join(', ')}`);
+    this._ws.send(JSON.stringify(msg));
+    logger.info(`[RpcSubscriber] logsSubscribe envoyé — wallet: ${walletAddress} (reqId=${id})`);
   }
 
-  /** Traite les messages entrants du WS */
   _handleMessage(msg) {
-    // Réponse à transactionSubscribe → stocke le subId
+    // Confirmation de souscription → stocke le subId
     if (msg.id && msg.result !== undefined && typeof msg.result === 'number') {
-      this._subId = msg.result;
-      logger.info(`[RpcSubscriber] ✅ Souscription confirmée — subId=${this._subId}`);
+      const wallet = this._pendingSubs.get(msg.id);
+      if (wallet) {
+        this._subIds.set(wallet, msg.result);
+        this._pendingSubs.delete(msg.id);
+        logger.info(`[RpcSubscriber] ✅ Souscription confirmée — wallet=${wallet} subId=${msg.result}`);
+      }
       return;
     }
 
-    // Notification de transaction
-    if (msg.method === 'transactionNotification') {
-      const params = msg.params;
-      if (!params || !params.result) return;
+    // Notification de log
+    if (msg.method === 'logsNotification') {
+      const value = msg.params?.result?.value;
+      if (!value) return;
 
-      const txResult = params.result;
-      const meta     = txResult.transaction?.meta;
-      const tx       = txResult.transaction?.transaction;
-      const sig      = tx?.signatures?.[0];
-      const slot     = txResult.slot;
+      const sig  = value.signature;
+      const logs = value.logs || [];
+      const err  = value.err;
 
       if (!sig) return;
-      if (meta?.err) return; // tx échouée
+      if (err)  return; // tx échouée
 
-      // Détermine quel wallet surveillé est impliqué
-      const accountKeys = tx?.message?.accountKeys || [];
-      const involvedWallet = accountKeys
-        .map(k => (typeof k === 'string' ? k : k?.pubkey))
-        .find(addr => this._wallets.has(addr));
+      // Trouve quel wallet est mentionné
+      const involvedWallet = [...this._wallets].find(w =>
+        logs.some(line => line.includes(w))
+      );
 
-      if (!involvedWallet) return; // ne concerne pas nos wallets
+      // Fallback: on émet quand même si on a le sig (le moteur ira chercher la tx)
+      const wallet = involvedWallet || null;
 
-      logger.debug(`[RpcSubscriber] 🔔 Tx détectée — wallet=${involvedWallet} sig=${sig}`);
+      logger.debug(`[RpcSubscriber] 🔔 Log détecté — wallet=${wallet} sig=${sig}`);
 
       this.emit('tx', {
-        walletAddress: involvedWallet,
+        walletAddress: wallet,
         signature:     sig,
-        slot,
+        slot:          msg.params?.result?.context?.slot,
+        logs,
       });
 
       return;
@@ -256,20 +239,18 @@ class RpcSubscriber extends EventEmitter {
     }
   }
 
-  // ──────────────────────────────────────────────────────────────────────────
+  // ────────────────────────────────────────────────────────────────────────
   // PRIVATE — Reconnexion & Ping
-  // ──────────────────────────────────────────────────────────────────────────
+  // ────────────────────────────────────────────────────────────────────────
 
   _scheduleReconnect() {
     if (this._isShuttingDown || this._isReconnecting) return;
 
-    this._isReconnecting    = true;
+    this._isReconnecting = true;
     this._reconnectAttempts++;
 
     if (this._reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
-      logger.error(
-        `[RpcSubscriber] 🔴 ${MAX_RECONNECT_ATTEMPTS} tentatives épuisées. Redémarre le bot.`
-      );
+      logger.error(`[RpcSubscriber] 🔴 ${MAX_RECONNECT_ATTEMPTS} tentatives épuisées.`);
       this._isReconnecting = false;
       return;
     }
@@ -287,7 +268,6 @@ class RpcSubscriber extends EventEmitter {
     }, delay);
   }
 
-  /** Ping WebSocket toutes les 30s pour maintenir la connexion */
   _startPing() {
     if (this._pingTimer) clearInterval(this._pingTimer);
 
@@ -295,13 +275,11 @@ class RpcSubscriber extends EventEmitter {
       if (this._isShuttingDown) return;
 
       if (!this._ws || this._ws.readyState !== WebSocket.OPEN) {
-        logger.warn('[RpcSubscriber] Ping: WS non ouvert → reconnexion');
         clearInterval(this._pingTimer);
         this._scheduleReconnect();
         return;
       }
 
-      // Envoie un ping JSON-RPC simple (getSlot)
       try {
         this._ws.send(JSON.stringify({
           jsonrpc: '2.0',
