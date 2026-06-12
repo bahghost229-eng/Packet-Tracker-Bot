@@ -20,6 +20,7 @@ const logger               = require('./utils/logger');
 const { initDB,
         getActiveStrategies } = require('./db/database');
 const rpcSubscriber        = require('./engines/rpcSubscriber');
+const heliusWebhook        = require('./utils/heliusWebhook');
 const StandardEngine       = require('./engines/standardEngine');
 const ChainEngine          = require('./engines/chainEngine');
 const { registerCommands } = require('./handlers/commands');
@@ -29,7 +30,7 @@ const { addStandardWizard, addChainWizard } = require('./handlers/scenes');
 // Validation de l'environnement
 // ─────────────────────────────────────────────────────────────────────────────
 
-const REQUIRED_ENV = ['TELEGRAM_BOT_TOKEN', 'HELIUS_API_KEY', 'HELIUS_RPC_HTTP', 'HELIUS_RPC_WSS'];
+const REQUIRED_ENV = ['TELEGRAM_BOT_TOKEN', 'HELIUS_API_KEY', 'HELIUS_RPC_HTTP'];
 for (const key of REQUIRED_ENV) {
   if (!process.env[key]) {
     logger.error(`❌ Variable d'environnement manquante: ${key}`);
@@ -103,11 +104,14 @@ async function main() {
     logger.warn(`[Boot] ⚠️ RPC non disponible au démarrage (${msg}) — le bot va quand même démarrer`);
   }
 
-  // 5. RPC Subscriber WSS
-  await rpcSubscriber.start();
-  logger.info('[Boot] ✅ Subscriber WebSocket Solana prêt');
+  // 5. Init webhook Helius (crée ou retrouve le webhook)
+  await heliusWebhook.init();
 
-  // 6. Scenes (wizards) — doivent être avant les commandes
+  // 6. Démarrage du serveur webhook + subscriber
+  await rpcSubscriber.start();
+  logger.info('[Boot] ✅ Webhook Helius prêt (HTTP POST /webhook)');
+
+  // 7. Scenes (wizards) — doivent être avant les commandes
   const stage = new Scenes.Stage([addStandardWizard, addChainWizard]);
   // Injecte restartEngines dans le state de chaque scene
   addStandardWizard.use((ctx, next) => {
@@ -121,10 +125,10 @@ async function main() {
   bot.use(session());
   bot.use(stage.middleware());
 
-  // 7. Commandes Telegram
+  // 8. Commandes Telegram
   registerCommands(bot, restartEngines, stage);
 
-  // 7. Démarrage initial des moteurs
+  // 9. Démarrage initial des moteurs
   await restartEngines();
 
   // 8. Lancement du bot (long polling)
