@@ -20,7 +20,7 @@ const WebSocket        = require('ws');
 const logger           = require('../utils/logger');
 
 const HELIUS_API_KEY       = process.env.HELIUS_API_KEY || '';
-const HELIUS_WS_URL        = `wss://atlas-mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
+const HELIUS_WS_URL        = `wss://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
 
 const RECONNECT_DELAY_MS   = parseInt(process.env.WS_RECONNECT_DELAY_MS || '5000', 10);
 const MAX_RECONNECT_DELAY  = 120_000;
