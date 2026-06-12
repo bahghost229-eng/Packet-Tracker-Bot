@@ -226,6 +226,45 @@ function extractParsedInstructions(tx) {
   return transfers;
 }
 
+/**
+ * Extrait le token SPL acheté dans une transaction.
+ * Cherche un transfert SPL dont le destinataire est `walletAddress`.
+ * Retourne le mint du token ou null si aucun token trouvé.
+ *
+ * @param {import('@solana/web3.js').ParsedTransactionWithMeta} tx
+ * @param {string} walletAddress - Wallet qui a fait l'achat
+ * @returns {string|null} - Adresse du mint ou null
+ */
+function extractBoughtTokenMint(tx, walletAddress) {
+  if (!tx?.meta) return null;
+
+  // postTokenBalances liste les soldes SPL après la tx
+  const postBalances = tx.meta.postTokenBalances || [];
+  const preBalances  = tx.meta.preTokenBalances  || [];
+
+  // Index des pre-balances par (accountIndex, mint)
+  const preMap = new Map();
+  for (const b of preBalances) {
+    preMap.set(`${b.accountIndex}_${b.mint}`, parseFloat(b.uiTokenAmount?.uiAmount || '0'));
+  }
+
+  // Cherche un compte dont le propriétaire = walletAddress et dont la balance a augmenté
+  for (const post of postBalances) {
+    const owner = post.owner;
+    if (owner !== walletAddress) continue;
+
+    const preKey  = `${post.accountIndex}_${post.mint}`;
+    const preAmt  = preMap.get(preKey) || 0;
+    const postAmt = parseFloat(post.uiTokenAmount?.uiAmount || '0');
+
+    if (postAmt > preAmt) {
+      return post.mint;
+    }
+  }
+
+  return null;
+}
+
 module.exports = {
   getConnection,
   resetConnection,
@@ -235,4 +274,5 @@ module.exports = {
   getParsedTransaction,
   extractSolTransfers,
   extractParsedInstructions,
+  extractBoughtTokenMint,
 };
